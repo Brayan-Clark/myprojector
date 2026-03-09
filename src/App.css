@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+@theme {
+  --font-inter: "Inter", sans-serif;
+  --font-roboto: "Roboto", sans-serif;
+
+  --color-discord-dark: #202225;
+  --color-discord-mid: #2f3136;
+  --color-discord-light: #36393f;
+  --color-discord-accent: #5865f2;
+}
+
+@layer base {
+  body {
+    @apply bg-discord-mid text-gray-200 font-inter m-0 p-0 overflow-hidden h-screen select-none;
+  }
+}
+
+/* Custom scrollbar for modern feel */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #202225;
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #18191c;
+}
