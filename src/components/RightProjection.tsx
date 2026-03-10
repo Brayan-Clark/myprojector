@@ -1,11 +1,10 @@
 import { useState, useEffect } from 'react';
-import { Check, Star, TriangleRight, AlertCircle, Cast } from 'lucide-react';
+import { Check, Star, AlertCircle, Cast } from 'lucide-react';
 
-export function RightProjection({ activeSong, bgImage, textSettings, isLiveActive, isBibleView }: any) {
+export function RightProjection({ activeSong, bgImage, textSettings, isLiveActive, isBibleView, activeVerseIdx, setActiveVerseIdx, getComputedSettingsForVerse, isBaseScreenProjected, setIsBaseScreenProjected }: any) {
 
   const verses = activeSong?.lyrics?.split('\n\n') || [];
   const [currentLines, setCurrentLines] = useState<string[]>([]);
-  const [activeVerseIdx, setActiveVerseIdx] = useState<number>(-1);
   
   // Reset and auto-jump when song changes
   useEffect(() => {
@@ -42,6 +41,12 @@ export function RightProjection({ activeSong, bgImage, textSettings, isLiveActiv
       localStorage.setItem('live_lyrics', JSON.stringify({ lines: initialLines, reference, isBible }));
       import('@tauri-apps/api/event').then(({ emit }) => {
         emit('update_live_lyrics', { lines: initialLines, reference, isBible }).catch(console.error);
+        
+        const styleConfig = getComputedSettingsForVerse(activeSong, initialIdx);
+        localStorage.setItem('live_style', JSON.stringify(styleConfig.textSettings));
+        localStorage.setItem('live_bg', styleConfig.bgImage);
+        emit('update_live_style', styleConfig.textSettings).catch(console.error);
+        emit('update_live_bg', styleConfig.bgImage).catch(console.error);
       });
     }
   }, [activeSong]);
@@ -54,7 +59,20 @@ export function RightProjection({ activeSong, bgImage, textSettings, isLiveActiv
         e.preventDefault();
         let newIdx = activeVerseIdx;
         if (e.key === 'ArrowUp' && activeVerseIdx > 0) newIdx--;
-        if (e.key === 'ArrowDown' && activeVerseIdx < verses.length - 1) newIdx++;
+        if (e.key === 'ArrowDown') {
+           if (activeVerseIdx < verses.length - 1) {
+              newIdx++;
+           } else {
+              setIsBaseScreenProjected(true);
+              localStorage.setItem('live_lyrics', JSON.stringify({ lines: [] }));
+              localStorage.removeItem('live_media');
+              import('@tauri-apps/api/event').then(async ({ emit }) => {
+                 await emit('update_live_lyrics', { lines: [] });
+                 await emit('update_live_media', null);
+              });
+              return;
+           }
+        }
         
         if (newIdx !== activeVerseIdx) {
           setActiveVerseIdx(newIdx);
@@ -71,6 +89,12 @@ export function RightProjection({ activeSong, bgImage, textSettings, isLiveActiv
           localStorage.setItem('live_lyrics', JSON.stringify({ lines, reference, isBible }));
           const { emit } = await import('@tauri-apps/api/event');
           await emit('update_live_lyrics', { lines, reference, isBible });
+
+          const styleConfig = getComputedSettingsForVerse(activeSong, newIdx);
+          localStorage.setItem('live_style', JSON.stringify(styleConfig.textSettings));
+          localStorage.setItem('live_bg', styleConfig.bgImage);
+          await emit('update_live_style', styleConfig.textSettings);
+          await emit('update_live_bg', styleConfig.bgImage);
         }
       }
     };
@@ -96,6 +120,27 @@ export function RightProjection({ activeSong, bgImage, textSettings, isLiveActiv
                 <AlertCircle size={32} />
                 <p className="text-xs text-center">Sélectionnez un chant pour projeter ses couplets</p>
              </div>
+          ) : (activeSong.type === 'image' || activeSong.type === 'video' || activeSong.type === 'document') ? (
+             <div 
+               className="group flex flex-col items-center justify-center bg-[#36393f] hover:bg-[#4752c4] text-gray-300 hover:text-white rounded cursor-pointer transition border border-transparent hover:border-[#5865f2] overflow-hidden p-6 gap-3"
+               onClick={async () => {
+                 try {
+                   setIsBaseScreenProjected(false);
+                   const { emit } = await import('@tauri-apps/api/event');
+                   const payload = { type: activeSong.type, url: activeSong.lyrics };
+                   localStorage.setItem('live_media', JSON.stringify(payload));
+                   localStorage.removeItem('live_lyrics');
+                   await emit('update_live_media', payload);
+                 } catch (e) { console.error(e) }
+               }}
+             >
+                <div className="font-bold text-lg text-center">
+                   Projeter {activeSong.type === 'image' ? "l'Image" : activeSong.type === 'video' ? "la Vidéo" : "le Document"}
+                </div>
+                <div className="text-xs opacity-70 text-center bg-black/20 p-2 rounded max-w-full truncate">
+                  {activeSong.title}
+                </div>
+             </div>
           ) : verses.map((verse: string, idx: number) => {
              // Détection rudimentaire Refrain/Strophe basée sur le contenu
              const isRefrain = verse.toLowerCase().includes('refrain') || idx === 1;
@@ -119,6 +164,7 @@ export function RightProjection({ activeSong, bgImage, textSettings, isLiveActiv
                 className={`group flex ${bgClass} hover:bg-[#4752c4] text-gray-300 hover:text-white rounded cursor-pointer transition border hover:border-[#5865f2] overflow-hidden`}
                 onClick={async () => {
                   try {
+                    setIsBaseScreenProjected(false);
                     const { emit } = await import('@tauri-apps/api/event');
                     const lines = verse.split('\n');
                     setCurrentLines(lines);
@@ -135,6 +181,12 @@ export function RightProjection({ activeSong, bgImage, textSettings, isLiveActiv
 
                     localStorage.setItem('live_lyrics', JSON.stringify({ lines, reference, isBible }));
                     await emit('update_live_lyrics', { lines, reference, isBible });
+
+                    const styleConfig = getComputedSettingsForVerse(activeSong, idx);
+                    localStorage.setItem('live_style', JSON.stringify(styleConfig.textSettings));
+                    localStorage.setItem('live_bg', styleConfig.bgImage);
+                    await emit('update_live_style', styleConfig.textSettings);
+                    await emit('update_live_bg', styleConfig.bgImage);
                   } catch (e) {
                     console.error("Failed to emit", e);
                   }
@@ -161,14 +213,22 @@ export function RightProjection({ activeSong, bgImage, textSettings, isLiveActiv
       {/* Rendu LIVE PREVIEW (Moniteur) */}
       <div className="aspect-video bg-[#18191c] border-t-2 border-[#5865f2] relative group overflow-hidden">
          {bgImage?.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i) ? (
-            <video key={bgImage} src={bgImage} autoPlay loop muted className="absolute inset-0 w-full h-full object-cover opacity-80" />
+            <video key={bgImage} src={bgImage} autoPlay loop muted playsInline className="absolute inset-0 w-full h-full object-cover opacity-80" />
          ) : (
             <img src={bgImage} className="absolute inset-0 w-full h-full object-cover opacity-80" alt="Background" />
          )}
          
          {/* Live Text Mockup */}
          <div className="absolute inset-0 flex items-center justify-center flex-col p-4 z-10 w-full h-full relative">
-            {activeSong ? (() => {
+            {isBaseScreenProjected ? (
+               <div className="flex-1"></div>
+            ) : activeSong && ['image', 'video', 'document'].includes(activeSong.type) ? (
+               <div className="w-full h-full flex items-center justify-center z-20 absolute inset-0 bg-black">
+                 {activeSong.type === 'image' && <img src={activeSong.lyrics} className="w-full h-full object-contain" alt="Media" />}
+                 {activeSong.type === 'video' && <video src={activeSong.lyrics} className="w-full h-full object-contain" controls autoPlay muted playsInline />}
+                 {activeSong.type === 'document' && <iframe src={activeSong.lyrics} className="w-full h-full border-none bg-white" title="Document" />}
+               </div>
+            ) : activeSong ? (() => {
                const isBible = isBibleView;
                let displayLines = currentLines;
                let reference = "";

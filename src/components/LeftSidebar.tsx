@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Search, Save, FolderOpen, X, BookOpen, Music, Search as SearchIcon, List, Download } from 'lucide-react';
+import { Save, FolderOpen, X, BookOpen, Music, Search as SearchIcon, List, Download, Plus, Trash2, ChevronUp, ChevronDown, FileText, Image as ImageIcon, Video, Type } from 'lucide-react';
 import { Store } from './Store';
 import Fuse from 'fuse.js';
 import { invoke } from '@tauri-apps/api/core';
@@ -12,6 +12,7 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
   // Bible specific state
   const [selectedBook, setSelectedBook] = useState("");
   const [selectedChapter, setSelectedChapter] = useState("");
+  const [showAddMenu, setShowAddMenu] = useState(false);
 
   useEffect(() => {
     async function fetchDbs() {
@@ -85,6 +86,154 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
     setSelectedChapter("");
   }, [activeDb, view]);
 
+  const handleSaveAgenda = async () => {
+    try {
+      try {
+        const { save } = await import('@tauri-apps/plugin-dialog');
+        const { writeTextFile } = await import('@tauri-apps/plugin-fs');
+        const filePath = await save({
+          filters: [{ name: 'Agenda JSON', extensions: ['json'] }]
+        });
+        if (filePath) {
+          await writeTextFile(filePath, JSON.stringify(playlist, null, 2));
+        }
+      } catch (tauriError) {
+        console.warn("Tauri API failed, using web fallback", tauriError);
+        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(playlist, null, 2));
+        const dlAnchorElem = document.createElement('a');
+        dlAnchorElem.setAttribute("href", dataStr);
+        dlAnchorElem.setAttribute("download", "agenda.json");
+        document.body.appendChild(dlAnchorElem);
+        dlAnchorElem.click();
+        document.body.removeChild(dlAnchorElem);
+      }
+    } catch (e) {
+      console.error("Save agenda err", e);
+    }
+  };
+
+  const handleLoadAgenda = async () => {
+    try {
+      try {
+        const { open } = await import('@tauri-apps/plugin-dialog');
+        const { readTextFile } = await import('@tauri-apps/plugin-fs');
+        const filePath = await open({
+          filters: [{ name: 'Agenda JSON', extensions: ['json'] }],
+          multiple: false
+        });
+        if (filePath && typeof filePath === 'string') {
+          const contents = await readTextFile(filePath);
+          const data = JSON.parse(contents);
+          if (Array.isArray(data)) {
+            setPlaylist(data);
+          }
+        }
+      } catch (tauriError) {
+        console.warn("Tauri API failed, using web fallback", tauriError);
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json';
+        input.onchange = e => { 
+           const file = (e.target as HTMLInputElement).files?.[0];
+           if (!file) return;
+           const reader = new FileReader();
+           reader.onload = (re) => {
+              try {
+                const data = JSON.parse(re.target?.result as string);
+                if (Array.isArray(data)) setPlaylist(data);
+              } catch(e) {}
+           }
+           reader.readAsText(file);
+        }
+        input.click();
+      }
+    } catch (e) {
+      console.error("Load agenda err", e);
+    }
+  };
+
+  const addToAgenda = () => {
+    if (activeSong && !playlist.some((s:any) => s.id === activeSong.id)) {
+      setPlaylist([...playlist, activeSong]);
+    }
+  };
+
+  const addCustomItem = () => {
+    const newItem = {
+      id: Date.now().toString(),
+      title: "Programme Libre",
+      number: "📝",
+      lyrics: "Entrez votre texte ici...",
+      type: "custom"
+    };
+    setPlaylist([...playlist, newItem]);
+    onSelectSong(newItem, 'agenda');
+  };
+
+  const addMediaItem = async (type: 'image' | 'video') => {
+    try {
+        const { open } = await import('@tauri-apps/plugin-dialog');
+        const { convertFileSrc } = await import('@tauri-apps/api/core');
+        const file = await open({
+          multiple: false,
+          filters: type === 'image' ? [{ name: 'Images', extensions: ['png', 'jpeg', 'jpg', 'webp', 'gif'] }] : [{ name: 'Videos', extensions: ['mp4', 'webm', 'ogg', 'mov', 'mkv', 'avi', 'm4v'] }]
+        });
+        if (file && typeof file === 'string') {
+          const assetUrl = convertFileSrc(file);
+          const filename = file.split(/[/\\]/).pop() || 'Media';
+          const newItem = {
+            id: Date.now().toString(),
+            title: filename,
+            number: type === 'image' ? '🖼️' : '🎬',
+            lyrics: assetUrl,
+            type: type
+          };
+          setPlaylist([...playlist, newItem]);
+        }
+    } catch(e) { console.error(e) }
+  };
+
+  const addFileItem = async () => {
+    try {
+        const { open } = await import('@tauri-apps/plugin-dialog');
+        const { convertFileSrc } = await import('@tauri-apps/api/core');
+        const file = await open({
+          multiple: false,
+          filters: [{ name: 'Documents', extensions: ['pdf', 'doc', 'docx', 'ppt', 'pptx'] }]
+        });
+        if (file && typeof file === 'string') {
+          const assetUrl = convertFileSrc(file);
+          const filename = file.split(/[/\\]/).pop() || 'Document';
+          const newItem = {
+            id: Date.now().toString(),
+            title: filename,
+            number: '📄',
+            lyrics: assetUrl,
+            type: 'document'
+          };
+          setPlaylist([...playlist, newItem]);
+        }
+    } catch(e) { console.error(e) }
+  };
+
+  const moveAgendaItem = (e: any, index: number, dir: 'up'|'down') => {
+    e.stopPropagation();
+    const newList = [...playlist];
+    if (dir === 'up' && index > 0) {
+      [newList[index-1], newList[index]] = [newList[index], newList[index-1]];
+    } else if (dir === 'down' && index < newList.length - 1) {
+      [newList[index+1], newList[index]] = [newList[index], newList[index+1]];
+    }
+    setPlaylist(newList);
+  };
+
+  const removeAgendaItem = (e: any, index: number) => {
+    e.stopPropagation();
+    const newList = [...playlist];
+    newList.splice(index, 1);
+    setPlaylist(newList);
+  };
+
   return (
     <div className="w-80 bg-[#202225] h-full flex flex-col border-r border-[#18191c]">
       
@@ -94,10 +243,30 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
            <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-2 text-gray-300">
              <List size={14} /> Agenda
            </span>
-           <div className="flex items-center gap-1">
-             <button className="p-1 hover:bg-[#3f4147] rounded text-gray-400 hover:text-white transition"><FolderOpen size={14} /></button>
-             <button className="p-1 hover:bg-[#3f4147] rounded text-gray-400 hover:text-white transition"><Save size={14} /></button>
-             <button className="p-1 hover:bg-red-500/20 rounded text-gray-400 hover:text-red-400 transition" onClick={() => setPlaylist([])}><X size={14} /></button>
+           <div className="flex items-center gap-1 relative">
+             <button className="p-1 hover:bg-[#3f4147] rounded text-gray-400 hover:text-white transition" title="Ajouter au programme" onClick={() => setShowAddMenu(!showAddMenu)}><Plus size={14} /></button>
+             {showAddMenu && (
+               <div className="absolute top-full left-0 mt-1 w-48 bg-[#2b2d31] border border-[#36393f] rounded shadow-xl z-50 py-1">
+                 <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addToAgenda(); setShowAddMenu(false); }}>
+                   <Music size={12} /> Sélection courante
+                 </button>
+                 <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addCustomItem(); setShowAddMenu(false); }}>
+                   <Type size={12} /> Composant Libre
+                 </button>
+                 <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addMediaItem('image'); setShowAddMenu(false); }}>
+                   <ImageIcon size={12} /> Image
+                 </button>
+                 <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addMediaItem('video'); setShowAddMenu(false); }}>
+                   <Video size={12} /> Vidéo
+                 </button>
+                 <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addFileItem(); setShowAddMenu(false); }}>
+                   <FileText size={12} /> Document / PDF
+                 </button>
+               </div>
+             )}
+             <button className="p-1 hover:bg-[#3f4147] rounded text-gray-400 hover:text-white transition" title="Charger un agenda" onClick={handleLoadAgenda}><FolderOpen size={14} /></button>
+             <button className="p-1 hover:bg-[#3f4147] rounded text-gray-400 hover:text-white transition" title="Sauvegarder l'agenda" onClick={handleSaveAgenda}><Save size={14} /></button>
+             <button className="p-1 hover:bg-red-500/20 rounded text-gray-400 hover:text-red-400 transition" title="Vider l'agenda" onClick={() => setPlaylist([])}><X size={14} /></button>
            </div>
         </div>
         <div className="flex-1 overflow-y-auto p-2 space-y-1">
@@ -107,12 +276,17 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
             playlist.map((item: any, idx: number) => (
               <div 
                 key={idx} 
-                className="px-2 py-1.5 rounded hover:bg-[#36393f] cursor-pointer flex items-center gap-2 group transition text-sm"
-                onClick={() => onSelectSong(item)}
+                className={`px-2 py-1.5 rounded hover:bg-[#36393f] cursor-pointer flex items-center gap-2 group transition text-sm ${activeSong?.id === item.id ? 'bg-[#36393f] border-l-2 border-[#5865f2]' : 'border-l-2 border-transparent'}`}
+                onClick={() => onSelectSong(item, 'agenda')}
               >
-                <Music size={12} className="text-[#5865f2]" />
-                <span className="text-gray-400 w-8">{item.number}</span>
+                <Music size={12} className="text-[#5865f2] shrink-0" />
+                <span className="text-gray-400 w-8 shrink-0">{item.number}</span>
                 <span className="text-gray-200 truncate flex-1">{item.title}</span>
+                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
+                  <button className="p-0.5 hover:bg-[#2b2d31] text-gray-400 hover:text-white rounded" title="Monter" onClick={(e) => moveAgendaItem(e, idx, 'up')}><ChevronUp size={12} /></button>
+                  <button className="p-0.5 hover:bg-[#2b2d31] text-gray-400 hover:text-white rounded" title="Descendre" onClick={(e) => moveAgendaItem(e, idx, 'down')}><ChevronDown size={12} /></button>
+                  <button className="p-0.5 hover:bg-red-500/20 text-gray-400 hover:text-red-400 rounded transition" title="Retirer" onClick={(e) => removeAgendaItem(e, idx)}><Trash2 size={12} /></button>
+                </div>
               </div>
             ))
           )}
@@ -186,7 +360,7 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
                           setPlaylist([...playlist, song]);
                         }
                       }}
-                      onClick={() => onSelectSong(song)}
+                      onClick={() => onSelectSong(song, view === 'chant' ? 'hymnes' : 'bible')}
                     >
                       <Music size={10} className="text-gray-500 group-hover:text-[#5865f2]" />
                       <span className="text-gray-400 w-6 font-mono">{song.number}</span>
@@ -227,7 +401,7 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
                             className={`text-xs text-center py-2 rounded transition border ${selectedChapter === s.number ? 'bg-[#5865f2] border-transparent text-white' : 'bg-[#1e1f22] border-[#36393f] text-gray-300 hover:border-[#5865f2] hover:bg-[#36393f]'}`}
                             onClick={() => {
                               setSelectedChapter(s.number);
-                              onSelectSong(s);
+                              onSelectSong(s, 'bible');
                             }}
                           >
                             {s.number}

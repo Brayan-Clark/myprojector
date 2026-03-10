@@ -25,16 +25,18 @@ export function MiddleEditor({ activeSong, onSave }: { activeSong: any, onSave: 
       // But book is pure book name for bible.
       // Hymnes are from adventools_data... 
       // For hymnes, activeSong.book contains the dbName without .db. So book + ".db".
-      const isBible = activeSong.number === "Chap" || isNaN(Number(activeSong.number));
-      const dbName = isBible ? `${activeSong.book}.SQLite3` : `${activeSong.book}.db`;
-      
-      await invoke("update_song", {
-        dbName,
-        isBible,
-        id: activeSong.id,
-        title: localTitle,
-        content: localContent
-      });
+      if (!activeSong.type || !['custom', 'image', 'video', 'document'].includes(activeSong.type)) {
+        const isBible = activeSong.number === "Chap" || isNaN(Number(activeSong.number));
+        const dbName = isBible ? `${activeSong.book}.SQLite3` : `${activeSong.book}.db`;
+        
+        await invoke("update_song", {
+          dbName,
+          isBible,
+          id: typeof activeSong.id === 'string' ? parseInt(activeSong.id) : activeSong.id,
+          title: localTitle,
+          content: localContent
+        });
+      }
       
       onSave({ ...activeSong, title: localTitle, lyrics: localContent });
       setIsEditing(false);
@@ -107,8 +109,17 @@ export function MiddleEditor({ activeSong, onSave }: { activeSong: any, onSave: 
       </div>
 
       {/* Editeur Texte */}
-      <div className="flex-1 p-4 overflow-y-auto">
-         {isEditing ? (
+      <div className="flex-1 p-4 overflow-y-auto relative">
+         {(activeSong?.type === 'image' || activeSong?.type === 'video' || activeSong?.type === 'document') ? (
+           <div className="w-full h-full flex flex-col items-center justify-center bg-black/20 rounded border border-[#202225] overflow-hidden relative">
+             <div className="absolute top-2 right-2 bg-black/80 text-white px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider z-10">
+               {activeSong.type}
+             </div>
+             {activeSong.type === 'image' && <img src={localContent} className="max-w-full max-h-full object-contain" alt="Aperçu image" />}
+             {activeSong.type === 'video' && <video src={localContent} className="max-w-full max-h-full object-contain" controls />}
+             {activeSong.type === 'document' && <iframe src={localContent} className="w-full h-full border-none bg-white" title="Aperçu document" />}
+           </div>
+         ) : isEditing ? (
            <textarea 
               className="w-full h-full bg-[#18191c] p-3 rounded text-gray-200 resize-none outline-none leading-relaxed text-sm font-medium ring-1 ring-[#5865f2]"
               value={localContent}
