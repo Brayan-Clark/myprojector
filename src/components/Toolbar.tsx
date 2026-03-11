@@ -26,10 +26,10 @@ export function Toolbar({
 
   const isVideoUrl = (url: string) => url.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i);
 
-  const defaultBgs = [
+  const defaultBgs: { name: string, url: string }[] = [
+    // { name: 'Easy Worship', url: '/backgrounds/easy_worship.mp4' }
     // { name: 'Sunset', url: '/backgrounds/sunset.jpg' },
-    { name: 'Book', url: '/backgrounds/books.jpg' },
-    { name: 'Easy Worship', url: '/backgrounds/easy_worship.mp4' }
+    // { name: 'Book', url: '/backgrounds/books.jpg' },
   ];
 
   const handleBgSelect = async (url: string) => {
