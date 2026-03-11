@@ -1,31 +1,148 @@
-import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { Toolbar } from "./components/Toolbar";
-import { LeftSidebar } from "./components/LeftSidebar";
-import { MiddleEditor } from "./components/MiddleEditor";
-import { RightProjection } from "./components/RightProjection";
-import { LiveView } from "./components/LiveView";
-import "./App.css";
+import { useState, useEffect, useMemo } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { Toolbar } from './components/Toolbar';
+import { LeftSidebar } from './components/LeftSidebar';
+import { MiddleEditor } from './components/MiddleEditor';
+import { RightProjection } from './components/RightProjection';
+import { LiveView } from './components/LiveView';
 
 function App() {
+  const [songs, setSongs] = useState<any[]>([]);
+  const [playlist, setPlaylist] = useState<any[]>([]);
   const [activeSong, setActiveSong] = useState<any>(null);
   const [activeVerseIdx, setActiveVerseIdx] = useState<number>(-1);
-  const [playlist, setPlaylist] = useState<any[]>(() => {
-    const saved = localStorage.getItem('appAgenda');
-    if (saved) return JSON.parse(saved);
-    return [];
-  });
-
-  useEffect(() => {
-    localStorage.setItem('appAgenda', JSON.stringify(playlist));
-  }, [playlist]);
-  
-  const [songs, setSongs] = useState<any[]>([]);
-  const [activeCategory, setActiveCategory] = useState<string>("chant");
-  const [isLoading, setIsLoading] = useState(true);
+  const [projectedSong, setProjectedSong] = useState<any>(null);
+  const [projectedVerseIdx, setProjectedVerseIdx] = useState<number>(-1);
+  const [isLoading, setIsLoading] = useState(false);
+  const [activeCategory, setActiveCategory] = useState<string>("hymnes");
   const [isLiveActive, setIsLiveActive] = useState(false);
   const [isContentHidden, setIsContentHidden] = useState(false);
   const [isBaseScreenProjected, setIsBaseScreenProjected] = useState(true);
+  const [liveCategory, setLiveCategory] = useState<string>("hymnes");
+  const [searchFocusTrigger, setSearchFocusTrigger] = useState(0);
+  const [favoriteDbs, setFavoriteDbs] = useState(() => {
+    const saved = localStorage.getItem('favoriteDbs');
+    return saved ? JSON.parse(saved) : { hymnes: "", bible: "" };
+  });
+  const [cameraList, setCameraList] = useState<MediaDeviceInfo[]>([]);
+  const [selectedCamera, setSelectedCamera] = useState<string>("");
+  const [isCameraActive, setIsCameraActive] = useState(false);
+
+  useEffect(() => {
+    navigator.mediaDevices.enumerateDevices().then(devices => {
+      const cams = devices.filter(d => d.kind === 'videoinput');
+      setCameraList(cams);
+      if (cams.length > 0) setSelectedCamera(cams[0].deviceId);
+    });
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('favoriteDbs', JSON.stringify(favoriteDbs));
+  }, [favoriteDbs]);
+
+  const isLiveMode = useMemo(() => new URLSearchParams(window.location.search).get('live') === 'true', []);
+
+  if (isLiveMode) {
+    return <LiveView />;
+  }
+
+  // Global Shortcuts
+  useEffect(() => {
+    const handleGlobalShortcuts = (e: KeyboardEvent) => {
+      if (e.altKey && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        setIsBaseScreenProjected(prev => {
+           const next = !prev;
+           if (next) {
+              import('@tauri-apps/api/event').then(({ emit }) => {
+                 emit('update_live_lyrics', { lines: [], reference: "" });
+                 emit('update_live_media', null);
+              });
+           }
+           return next;
+        });
+      }
+      if (e.altKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        if (playlist.length > 0) {
+          setActiveSong(playlist[0]);
+          setActiveVerseIdx(0);
+          setIsBaseScreenProjected(false);
+          setLiveCategory(playlist[0].type === 'bible' ? 'bible' : 'hymnes');
+        }
+      }
+      if (e.altKey && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        setSearchFocusTrigger(prev => prev + 1);
+      }
+      if (e.altKey && e.key.toLowerCase() === 'l') {
+        e.preventDefault();
+        handleLiveToggle();
+      }
+      if (e.altKey && e.key.toLowerCase() === 'h') {
+        e.preventDefault();
+        setIsContentHidden(prev => !prev);
+        import('@tauri-apps/api/event').then(({ emit }) => {
+           emit('update_live_hide_content', !isContentHidden);
+        });
+      }
+    };
+    window.addEventListener('keydown', handleGlobalShortcuts);
+    return () => window.removeEventListener('keydown', handleGlobalShortcuts);
+  }, [playlist, isLiveActive, isContentHidden]);
+
+  const handleLiveToggle = async () => {
+    const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+    let existing = await WebviewWindow.getByLabel('live');
+
+    if (existing) {
+      try {
+        await existing.close();
+      } catch (e) {
+        console.error("Failed to close window", e);
+        // Force state reset if close fails (e.g. window already gone but handle still exists)
+        setIsLiveActive(false);
+      }
+      return;
+    }
+
+    try {
+      const { availableMonitors } = await import('@tauri-apps/api/window');
+      const monitors = await availableMonitors();
+      let opts: any = { 
+        url: '/?live=true', 
+        title: 'Live', 
+        fullscreen: true, 
+        decorations: false,
+        skipTaskbar: true,
+        alwaysOnTop: true,
+        focus: false
+      };
+      
+      if (monitors.length > 1) { 
+         const m = monitors[monitors.length - 1];
+         opts.x = m.position.x; 
+         opts.y = m.position.y; 
+      }
+      
+      const w = new WebviewWindow('live', opts);
+      
+      setIsLiveActive(true);
+
+      // Listen to window destruction to reset state instantly
+      w.once('tauri://destroyed', () => {
+        setIsLiveActive(false);
+      });
+      
+      w.once('tauri://error', () => {
+        setIsLiveActive(false);
+      });
+      
+    } catch (e) {
+      console.error("Window failed", e);
+      setIsLiveActive(false);
+    }
+  };
 
   const defaultTextSettings = {
     fontFamily: 'Inter',
@@ -34,14 +151,17 @@ function App() {
     isItalic: false,
     isUnderline: false,
     align: 'center',
-    color: '#ffffff'
+    valign: 'middle',
+    color: '#ffffff',
+    lineHeight: 1.4,
+    contentWidth: 100
   };
 
   const defaultStyles: any = {
-    chant: { textSettings: { ...defaultTextSettings }, bgImage: "http://localhost:1420/backgrounds/pexels-m-venter-79250-1659437.jpg" },
-    hymnes: { textSettings: { ...defaultTextSettings }, bgImage: "http://localhost:1420/backgrounds/pexels-m-venter-79250-1659437.jpg" },
-    bible: { textSettings: { ...defaultTextSettings, align: 'left' }, bgImage: "http://localhost:1420/backgrounds/pexels-m-venter-79250-1659437.jpg" },
-    agenda: { textSettings: { ...defaultTextSettings }, bgImage: "http://localhost:1420/backgrounds/pexels-m-venter-79250-1659437.jpg" },
+    chant: { textSettings: { ...defaultTextSettings }, bgImage: "http://localhost:1420/backgrounds/sunset.jpg" },
+    hymnes: { textSettings: { ...defaultTextSettings }, bgImage: "http://localhost:1420/backgrounds/sunset.jpg" },
+    bible: { textSettings: { ...defaultTextSettings, align: 'left' }, bgImage: "http://localhost:1420/backgrounds/tree.png" },
+    agenda: { textSettings: { ...defaultTextSettings }, bgImage: "http://localhost:1420/backgrounds/sunset.jpg" },
   };
 
   const [settingsByCategory, setSettingsByCategory] = useState(() => {
@@ -62,16 +182,17 @@ function App() {
 
   const [editingScope, setEditingScope] = useState<'category'|'book'|'song'|'verse'|'base'>('category');
 
-  const getComputedSettingsForVerse = (song: any, verseIdx: number, forceBase: boolean = false) => {
+  const getComputedSettingsForVerse = (song: any, verseIdx: number, forceBase: boolean = false, categoryOverride?: string) => {
      if (!song || forceBase) {
         return {
            textSettings: { ...defaultStyles.chant?.textSettings, ...(specificSettings.base?.textSettings || {}) },
            bgImage: specificSettings.base?.bgImage || defaultStyles.chant?.bgImage
         };
      }
-     
-     let txt = { ...defaultStyles.chant?.textSettings, ...(settingsByCategory[activeCategory]?.textSettings || {}) };
-     let bg = settingsByCategory[activeCategory]?.bgImage || defaultStyles.chant?.bgImage;
+          const category = categoryOverride || (song?.type === 'bible' ? 'bible' : 'hymnes');
+      const baseCategoryStyle = defaultStyles[category] || defaultStyles.chant;
+      let txt = { ...baseCategoryStyle.textSettings, ...(settingsByCategory[category]?.textSettings || {}) };
+      let bg = settingsByCategory[category]?.bgImage || baseCategoryStyle.bgImage;
 
      if (song?.book && specificSettings.books[song.book]) {
         txt = { ...txt, ...specificSettings.books[song.book].textSettings };
@@ -86,9 +207,78 @@ function App() {
         if (specificSettings.verses[`${song.id}_${verseIdx}`].bgImage) bg = specificSettings.verses[`${song.id}_${verseIdx}`].bgImage;
      }
      return { textSettings: txt, bgImage: bg };
-  };
+   };
+ 
+   const computedLiveSettings = useMemo(() => 
+     getComputedSettingsForVerse(projectedSong, projectedVerseIdx, isBaseScreenProjected, liveCategory),
+     [projectedSong, projectedVerseIdx, isBaseScreenProjected, liveCategory, settingsByCategory, specificSettings]
+   );
 
-  const computedLiveSettings = getComputedSettingsForVerse(activeSong, activeVerseIdx, isBaseScreenProjected);
+   const previewSettings = useMemo(() => 
+     getComputedSettingsForVerse(activeSong, activeVerseIdx, false, activeCategory),
+     [activeSong, activeVerseIdx, activeCategory, settingsByCategory, specificSettings]
+   );
+
+    // ROBUST SYNC: Ensures LiveView always matches the Controller
+    // ROBUST SYNC: Ensures LiveView always matches the Controller
+    const sync = async () => {
+      localStorage.setItem('live_style', JSON.stringify(computedLiveSettings.textSettings));
+      localStorage.setItem('live_bg', computedLiveSettings.bgImage);
+
+      if (!isLiveActive) return;
+
+      const { emit } = await import('@tauri-apps/api/event');
+
+      // 1. Send Style & Background
+      emit('update_live_style', computedLiveSettings.textSettings).catch(() => null);
+      emit('update_live_bg', computedLiveSettings.bgImage).catch(() => null);
+      
+      // 2. Compute Content
+      let lyricsObj: any = { lines: [], reference: "", isBible: false };
+      let mediaObj: any = null;
+
+      if (!isBaseScreenProjected && projectedSong) {
+         if (['image', 'video', 'document'].includes(projectedSong.type)) {
+            mediaObj = { type: projectedSong.type, url: projectedSong.lyrics };
+         } else {
+            const verses = projectedSong.lyrics.split(/\n\s*\n/);
+            const safeIdx = Math.max(0, Math.min(projectedVerseIdx, verses.length - 1));
+            const currentVerse = verses[safeIdx] || "";
+            const lines = currentVerse.split('\n');
+            const isBible = (liveCategory === 'bible' || projectedSong.type === 'bible');
+            
+            const refMatch = lines.length > 0 ? lines[0].match(/^(\d+)/) : null;
+            let reference = "";
+            if (isBible && refMatch) {
+               reference = `${projectedSong.title}:${refMatch[1]}`;
+            } else if (!isBible && projectedSong?.title) {
+               reference = `(${projectedSong.title})`;
+            }
+            lyricsObj = { lines, reference, isBible };
+         }
+      }
+
+      // 3. Emit atomic content update to avoid race conditions
+      emit('update_live_content', { lyrics: lyricsObj, media: mediaObj }).catch(() => null);
+      emit('update_live_hide_content', isContentHidden).catch(() => null);
+      
+      localStorage.setItem('live_lyrics', JSON.stringify(lyricsObj));
+      localStorage.setItem('live_media', JSON.stringify(mediaObj));
+    };
+
+    useEffect(() => {
+      sync();
+    }, [isLiveActive, computedLiveSettings, projectedSong, projectedVerseIdx, isBaseScreenProjected, isContentHidden, liveCategory]);
+
+    useEffect(() => {
+      let unlisten: any;
+      import('@tauri-apps/api/event').then(({ listen }) => {
+        listen('live_ready', () => {
+          sync();
+        }).then(u => unlisten = u);
+      });
+      return () => { if (unlisten) unlisten(); };
+    }, [projectedSong, projectedVerseIdx, isBaseScreenProjected, isLiveActive]);
 
   const getEditingSettings = () => {
     if (editingScope === 'base') {
@@ -106,9 +296,24 @@ function App() {
     return settingsByCategory[activeCategory] || defaultStyles.chant;
   };
   
-  const editingTarget = getEditingSettings();
-  const tbTextSettings = { ...computedLiveSettings.textSettings, ...editingTarget.textSettings };
-  const tbBgImage = editingTarget.bgImage || computedLiveSettings.bgImage;
+  const getEditingContext = () => {
+    // Determine the base style to start from for the toolbar
+    const category = (editingScope === 'category') ? activeCategory : (activeSong?.type === 'bible' ? 'bible' : 'hymnes');
+    const baseStyle = settingsByCategory[category] || defaultStyles.chant;
+    
+    let txt = { ...baseStyle.textSettings };
+    let bg = baseStyle.bgImage;
+
+    const target = getEditingSettings();
+    txt = { ...txt, ...target.textSettings };
+    if (target.bgImage) bg = target.bgImage;
+
+    return { textSettings: txt, bgImage: bg };
+  };
+  
+  const tbContext = getEditingContext();
+  const tbTextSettings = tbContext.textSettings;
+  const tbBgImage = tbContext.bgImage;
 
   const handleUpdateTextSettings = (newText: any) => {
     const nextStyle = typeof newText === 'function' ? newText(tbTextSettings) : newText;
@@ -170,36 +375,24 @@ function App() {
   };
 
   const clearSpecificSettings = () => {
-       if (editingScope === 'category') return;
-       setSpecificSettings((prev: any) => {
-         let updated = { ...JSON.parse(JSON.stringify(prev)) };
-         if (editingScope === 'base') {
-            delete updated.base;
-         } else if (editingScope === 'verse' && activeSong && activeVerseIdx !== -1) {
-            const key = `${activeSong.id}_${activeVerseIdx}`;
-            delete updated.verses[key];
-         } else if (editingScope === 'song' && activeSong) {
-            delete updated.songs[activeSong.id];
-         } else if (editingScope === 'book' && activeSong?.book) {
-            delete updated.books[activeSong.book];
-         }
-         return updated;
-       });
+        if (editingScope === 'category') return;
+        setSpecificSettings((prev: any) => {
+          let updated = { ...JSON.parse(JSON.stringify(prev)) };
+          if (editingScope === 'base') {
+             delete updated.base;
+          } else if (editingScope === 'verse' && activeSong && activeVerseIdx !== -1) {
+             const key = `${activeSong.id}_${activeVerseIdx}`;
+             delete updated.verses[key];
+          } else if (editingScope === 'song' && activeSong) {
+             delete updated.songs[activeSong.id];
+          } else if (editingScope === 'book' && activeSong?.book) {
+             delete updated.books[activeSong.book];
+          }
+          return updated;
+        });
   };
 
-  useEffect(() => {
-    localStorage.setItem('live_style', JSON.stringify(computedLiveSettings.textSettings));
-    localStorage.setItem('live_bg', computedLiveSettings.bgImage);
-    import('@tauri-apps/api/event').then(({ emit }) => {
-      emit('update_live_style', computedLiveSettings.textSettings).catch(()=>null);
-      emit('update_live_bg', computedLiveSettings.bgImage).catch(()=>null);
-    });
-  }, [computedLiveSettings.textSettings, computedLiveSettings.bgImage]);
 
-  // Si on est dans la fenêtre du projecteur (paramètre live=true)
-  if (new URLSearchParams(window.location.search).get("live")) {
-    return <LiveView />;
-  }
 
   const loadDbData = async (category: string, dbName: string) => {
     setIsLoading(true);
@@ -208,11 +401,9 @@ function App() {
       if (category === "hymnes") {
         const result: any[] = await invoke("fetch_hymns", { dbName });
         setSongs(result);
-        if (result.length > 0) setActiveSong(result[0]);
       } else if (category === "bible") {
         const result: any[] = await invoke("fetch_bible", { dbName });
         setSongs(result);
-        if (result.length > 0) setActiveSong(result[0]);
       }
     } catch (e) {
       console.error("Failed to load DB", e);
@@ -222,20 +413,17 @@ function App() {
   };
 
   useEffect(() => {
-    // on first load, we don't know the installed DBs yet, LeftSidebar will call loadDbData
     setIsLoading(false);
   }, []);
 
   return (
     <div className="flex flex-col h-screen w-full bg-[#18191c] overflow-hidden font-sans text-gray-200">
-      
-      {/* 1. TOP BAR - Ribbon / Toolbar */}
       <Toolbar 
          setBgImage={handleUpdateBgImage} 
          textSettings={tbTextSettings} 
          setTextSettings={handleUpdateTextSettings} 
          isLiveActive={isLiveActive}
-         setIsLiveActive={setIsLiveActive}
+         handleLiveToggle={handleLiveToggle}
          editingScope={editingScope}
          setEditingScope={setEditingScope}
          activeSong={activeSong}
@@ -246,23 +434,40 @@ function App() {
          setIsContentHidden={setIsContentHidden}
          isBaseScreenProjected={isBaseScreenProjected}
          setIsBaseScreenProjected={setIsBaseScreenProjected}
+         cameraList={cameraList}
+         selectedCamera={selectedCamera}
+         setSelectedCamera={setSelectedCamera}
+         isCameraActive={isCameraActive}
+         setIsCameraActive={setIsCameraActive}
       />
 
-      {/* MAIN CONTENT SPLIT */}
       <div className="flex-1 flex min-h-0">
-         
-         {/* 2. LEFT - Playlist & Library */}
          <LeftSidebar 
             songs={songs} 
             playlist={playlist} 
             setPlaylist={setPlaylist} 
-            onSelectSong={setActiveSong} 
+            onSelectSong={(song: any, category: string) => {
+               setActiveSong(song);
+               let startIdx = 0;
+               if (song.startVerse) {
+                 const verses = song.lyrics?.split(/\n\s*\n/) || [];
+                 const foundIdx = verses.findIndex((v: string) => v.trim().startsWith(song.startVerse));
+                 if (foundIdx !== -1) startIdx = foundIdx;
+               }
+               setActiveVerseIdx(startIdx); 
+               if (category) setActiveCategory(category);
+               setIsBaseScreenProjected(false);
+            }} 
             isLoading={isLoading}
             onLoadDb={loadDbData}
             activeSong={activeSong}
+            searchFocusTrigger={searchFocusTrigger}
+            favoriteDbs={favoriteDbs}
+            toggleFavoriteDb={(category: string, db: string) => {
+              setFavoriteDbs((prev: any) => ({ ...prev, [category]: prev[category] === db ? "" : db }));
+            }}
          />
 
-         {/* 3. MIDDLE - Song Editor */}
          <MiddleEditor 
             activeSong={activeSong} 
             onSave={(updatedSong: any) => {
@@ -271,20 +476,28 @@ function App() {
             }} 
          />
 
-         {/* 4. RIGHT - Slides list & Live Preview */}
          <RightProjection 
             activeSong={activeSong} 
+            projectedSong={projectedSong}
+            projectedVerseIdx={projectedVerseIdx}
             bgImage={computedLiveSettings.bgImage} 
             textSettings={computedLiveSettings.textSettings} 
+            previewSettings={previewSettings.textSettings}
+            previewBg={previewSettings.bgImage}
             isLiveActive={isLiveActive} 
             isBibleView={activeCategory === 'bible'}
             activeVerseIdx={activeVerseIdx}
             setActiveVerseIdx={setActiveVerseIdx}
-            getComputedSettingsForVerse={getComputedSettingsForVerse}
+            onProject={(song: any, idx: number) => {
+               setProjectedSong(song);
+               setProjectedVerseIdx(idx);
+               setIsBaseScreenProjected(false);
+               setLiveCategory(activeCategory);
+            }}
             isBaseScreenProjected={isBaseScreenProjected}
             setIsBaseScreenProjected={setIsBaseScreenProjected}
+            activeCategory={activeCategory}
          />
-
       </div>
     </div>
   );

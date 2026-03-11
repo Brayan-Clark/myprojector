@@ -1,0 +1,43 @@
+@import "tailwindcss";
+
+@theme {
+  --font-inter: "Inter", sans-serif;
+  --font-roboto: "Roboto", sans-serif;
+
+  --color-discord-dark: #202225;
+  --color-discord-mid: #2f3136;
+  --color-discord-light: #36393f;
+  --color-discord-accent: #5865f2;
+}
+
+@layer base {
+  body {
+    @apply bg-discord-mid text-gray-200 font-inter m-0 p-0 overflow-hidden h-screen select-none;
+  }
+}
+
+/* Custom scrollbar for modern feel */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #1e1f22;
+}
+::-webkit-scrollbar-thumb {
+  background: #36393f;
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #4f545c;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Hide focus ring but keep it accessible */
+:focus-visible {
+  outline: 2px solid #5865f2;
+}
+

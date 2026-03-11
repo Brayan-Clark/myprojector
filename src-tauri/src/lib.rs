@@ -1,5 +1,6 @@
 use rusqlite::{Connection, Result};
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 
 #[derive(Serialize, Deserialize)]
 pub struct Song {
@@ -213,6 +214,19 @@ async fn download_db(url: String, category: String, filename: String) -> Result<
 }
 
 #[tauri::command]
+fn delete_db(category: &str, filename: &str) -> Result<(), String> {
+    let mut db_path = std::env::current_dir().map_err(|e| e.to_string())?;
+    db_path.push("data");
+    db_path.push(category);
+    db_path.push(filename);
+
+    if db_path.exists() {
+        fs::remove_file(db_path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn list_backgrounds() -> Result<Vec<String>, String> {
     let mut dir_path = std::env::current_dir().map_err(|e| e.to_string())?;
     dir_path.push("data");
@@ -245,12 +259,21 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { .. } => {
+                if window.label() == "main" {
+                    window.app_handle().exit(0);
+                }
+            }
+            _ => {}
+        })
         .invoke_handler(tauri::generate_handler![
             fetch_hymns,
             fetch_bible,
             update_song,
             list_dbs,
             download_db,
+            delete_db,
             list_backgrounds
         ])
         .run(tauri::generate_context!())

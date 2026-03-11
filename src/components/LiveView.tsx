@@ -6,37 +6,50 @@ export function LiveView() {
   const [lines, setLines] = useState<string[]>([]);
   const [reference, setReference] = useState<string>("");
   const [isBible, setIsBible] = useState<boolean>(true);
-  const [bgImage, setBgImage] = useState<string>(() => localStorage.getItem('live_bg') || "http://localhost:1420/backgrounds/pexels-m-venter-79250-1659437.jpg");
+  const [bgImage, setBgImage] = useState<string>(() => localStorage.getItem('live_bg') || "/backgrounds/sunset.jpg");
   const [mediaOverlay, setMediaOverlay] = useState<{type: string, url: string} | null>(() => {
     const saved = localStorage.getItem('live_media');
-    if (saved) return JSON.parse(saved);
-    return null;
+    return saved ? JSON.parse(saved) : null;
   });
   const [isContentHidden, setIsContentHidden] = useState<boolean>(false);
   const [overlayColor, setOverlayColor] = useState<'black' | 'white' | null>(null);
+  const [textContent, setTextContent] = useState<string | null>(null);
+  const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
+  const [cameraDeviceId, setCameraDeviceId] = useState<string>("");
 
-  const [textSettings, setTextSettings] = useState<any>(() => JSON.parse(localStorage.getItem('live_style') || '{}') || {
-    fontFamily: 'Inter',
-    fontSize: 100,
-    isBold: true,
-    isItalic: false,
-    isUnderline: false,
-    align: 'center',
-    color: '#ffffff'
+  const [textSettings, setTextSettings] = useState<any>(() => {
+    const saved = localStorage.getItem('live_style');
+    const defaults = {
+      fontFamily: 'Inter',
+      fontSize: 100,
+      isBold: true, align: 'center', valign: 'middle', color: '#ffffff',
+      lineHeight: 1.4,
+      contentWidth: 100
+    };
+    if (!saved) return defaults;
+    try {
+      const parsed = JSON.parse(saved);
+      return Object.keys(parsed).length === 0 ? defaults : parsed;
+    } catch(e) { return defaults; }
   });
 
+  const cleanUrl = (url: string) => {
+    if (!url) return "";
+    try {
+      return decodeURIComponent(url);
+    } catch(e) {
+      return url;
+    }
+  };
+
   useEffect(() => {
-    // Rend cette fenêtre toujours au-dessus et en plein écran au démarrage (optionnel mais utile pour un projecteur)
     const initWindow = async () => {
       try {
         const win = getCurrentWindow();
         await win.setFullscreen(true);
-      } catch (e) {
-        console.error("Erreur de fenetre", e);
-      }
+      } catch (e) { console.error(e); }
       
       try {
-         // Restore lyrics from localstorage if present
          const savedLyrics = localStorage.getItem('live_lyrics');
          if (savedLyrics) {
             const data = JSON.parse(savedLyrics);
@@ -44,130 +57,157 @@ export function LiveView() {
             setReference(data.reference || "");
             setIsBible(data.isBible || false);
          }
-      } catch (e) {
-         console.error(e);
-      }
+      } catch (e) { console.error(e); }
+
+      // Signal that we are ready to receive data
+      import('@tauri-apps/api/event').then(({ emit }) => {
+        emit('live_ready');
+      });
     };
     initWindow();
 
-    // On écoute les événements provenant de la fenêtre principale
-    const unlistenLyrics = listen<any>("update_live_lyrics", (event) => {
-      const payloadLines = event.payload.lines || [];
-      const ref = event.payload.reference || "";
-      const isBib = event.payload.isBible || false;
-      setReference(ref);
-      setIsBible(isBib);
-      setMediaOverlay(null);
-      localStorage.removeItem('live_media');
-      
-      // If there's a reference and the first line is just a number, strip it
-      if (isBib && ref && payloadLines.length > 0 && /^\d+$/.test(payloadLines[0].trim())) {
-        setLines(payloadLines.slice(1));
-      } else {
-        setLines(payloadLines);
-      }
-    });
-
-    const unlistenMedia = listen<any>("update_live_media", (event) => {
-      setMediaOverlay(event.payload);
-      setLines([]);
-      setReference("");
-      setIsBible(false);
-      localStorage.removeItem('live_lyrics');
-    });
-
-    const unlistenBg = listen<string>("update_live_bg", (event) => {
-      setBgImage(event.payload);
-    });
-
-    const unlistenStyle = listen<any>("update_live_style", (event) => {
-      setTextSettings(event.payload);
-    });
-
-    const unlistenHideContent = listen<boolean>("update_live_hide_content", (event) => {
-      setIsContentHidden(event.payload);
-    });
-
-    const unlistenOverlay = listen<'black'|'white'|null>("update_live_overlay", (event) => {
-      setOverlayColor(event.payload);
-    });
+    const unlistens = [
+      listen<any>("update_live_content", (event) => {
+        const { lyrics, media } = event.payload;
+        console.log("Atomic Content Update:", event.payload);
+        
+        // 1. Update Media
+        setMediaOverlay(media);
+        
+        // 2. Update Lyrics
+        if (media) {
+           setLines([]);
+           setReference("");
+           setIsBible(false);
+        } else {
+           const payloadLines = lyrics.lines || [];
+           const ref = lyrics.reference || "";
+           const isBib = !!lyrics.isBible;
+           
+           setReference(ref);
+           setIsBible(isBib);
+           
+           let finalLines = payloadLines;
+           if (isBib && ref && finalLines.length > 1) {
+              if (/^\d+$/.test(finalLines[0].trim())) {
+                 finalLines = finalLines.slice(1);
+              }
+           }
+           setLines(finalLines);
+        }
+      }),
+      listen<string>("update_live_bg", (event) => setBgImage(event.payload)),
+      listen<any>("update_live_style", (event) => {
+        console.log("Received style:", event.payload);
+        setTextSettings(event.payload);
+      }),
+      listen<boolean>("update_live_hide_content", (event) => setIsContentHidden(event.payload)),
+      listen<'black'|'white'|null>("update_live_overlay", (event) => setOverlayColor(event.payload)),
+      listen<boolean>("toggle_live_camera", (event) => setIsCameraActive(event.payload)),
+      listen<string>("set_camera_id", (event) => setCameraDeviceId(event.payload))
+    ];
 
     return () => {
-      unlistenLyrics.then(f => f());
-      unlistenMedia.then(f => f());
-      unlistenBg.then(f => f());
-      unlistenStyle.then(f => f());
-      unlistenHideContent.then(f => f());
-      unlistenOverlay.then(f => f());
+      unlistens.forEach(u => u.then(f => f()));
     };
   }, []);
 
+  useEffect(() => {
+    let stream: MediaStream | null = null;
+    const startCam = async () => {
+       if (isCameraActive) {
+          try {
+             const constraints = { 
+               video: cameraDeviceId ? { deviceId: { exact: cameraDeviceId }, width: 1920, height: 1080 } : { width: 1920, height: 1080 } 
+             };
+             stream = await navigator.mediaDevices.getUserMedia(constraints);
+             const vid = document.getElementById('live-camera-feed') as HTMLVideoElement;
+             if (vid) vid.srcObject = stream;
+          } catch (e) { 
+             console.error(e); 
+             // Fallback if ID fails
+             if (cameraDeviceId) {
+                try {
+                  stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1920, height: 1080 } });
+                  const vid = document.getElementById('live-camera-feed') as HTMLVideoElement;
+                  if (vid) vid.srcObject = stream;
+                } catch(e2) { setIsCameraActive(false); }
+             } else { setIsCameraActive(false); }
+          }
+       }
+    };
+    startCam();
+    return () => {
+       if (stream) {
+          stream.getTracks().forEach(t => t.stop());
+       }
+    };
+  }, [isCameraActive, cameraDeviceId]);
+
+  useEffect(() => {
+    if (mediaOverlay && mediaOverlay.type === 'document') {
+      const isText = mediaOverlay.url.match(/\.(txt|md)(\?.*)?$/i);
+      if (isText) {
+        fetch(mediaOverlay.url).then(r => r.text()).then(setTextContent).catch(() => setTextContent(null));
+      } else { setTextContent(null); }
+    } else { setTextContent(null); }
+  }, [mediaOverlay]);
+
   return (
     <div className="w-screen h-screen bg-black overflow-hidden relative">
-      {bgImage?.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i) ? (
-        <video key={bgImage} src={bgImage} autoPlay loop muted playsInline preload="auto" className="absolute inset-0 w-full h-full object-cover">
-        </video>
+      {isCameraActive ? (
+        <video id="live-camera-feed" autoPlay playsInline className="absolute inset-0 w-full h-full object-cover z-0"></video>
+      ) : bgImage?.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i) ? (
+        <video key={bgImage} src={cleanUrl(bgImage)} autoPlay loop muted playsInline preload="auto" className="absolute inset-0 w-full h-full object-cover"></video>
       ) : (
-        <img src={bgImage} className="absolute inset-0 w-full h-full object-cover" alt="fond d'écran" />
+        <img src={bgImage} className="absolute inset-0 w-full h-full object-cover" alt="bg" />
       )}
 
-      {/* Overlay couleur unie (Noir/Blanc) - Cache tout, même le fond */}
-      {overlayColor === 'black' && (
-         <div className="absolute inset-0 z-50 bg-black"></div>
-      )}
-      {overlayColor === 'white' && (
-         <div className="absolute inset-0 z-50 bg-white"></div>
-      )}
+      {overlayColor && <div className={`absolute inset-0 z-50 ${overlayColor === 'black' ? 'bg-black' : 'bg-white'}`}></div>}
 
-      {/* Contenus conditionnés par isContentHidden */}
       <div className={`absolute inset-0 w-full h-full transition-opacity duration-300 ${isContentHidden ? 'opacity-0' : 'opacity-100'}`}>
-          {mediaOverlay && mediaOverlay.type === 'image' && (
+          {mediaOverlay && (
              <div className="absolute inset-0 z-30 bg-black flex items-center justify-center">
-                <img src={mediaOverlay.url} className="w-full h-full object-contain" alt="Media" />
+                {mediaOverlay.type === 'image' && <img src={mediaOverlay.url} className="w-full h-full object-contain" alt="Media" />}
+                {mediaOverlay.type === 'video' && <video key={mediaOverlay.url} src={cleanUrl(mediaOverlay.url)} className="w-full h-full object-contain" autoPlay playsInline preload="auto" />}
+                {mediaOverlay.type === 'document' && (
+                  <div className="w-full h-full bg-white text-black overflow-hidden flex items-center justify-center">
+                    {textContent ? <div className="p-10 whitespace-pre-wrap font-mono text-lg text-left w-full h-full overflow-y-auto">{textContent}</div> : <iframe src={cleanUrl(mediaOverlay.url)} className="w-full h-full border-none" title="Doc" />}
+                  </div>
+                )}
              </div>
           )}
 
-          {mediaOverlay && mediaOverlay.type === 'video' && (
-             <div className="absolute inset-0 z-30 bg-black flex items-center justify-center">
-                <video src={mediaOverlay.url} className="w-full h-full object-contain" controls autoPlay playsInline />
-             </div>
-          )}
-
-          {mediaOverlay && mediaOverlay.type === 'document' && (
-             <div className="absolute inset-0 z-30 bg-white flex items-center justify-center">
-                <iframe src={mediaOverlay.url} title="Document" className="w-full h-full border-none" />
-             </div>
-          )}
-
-          {isBible && reference && (
-             <div className="absolute top-8 right-12 z-20 text-white/80 font-bold text-3xl drop-shadow-md">
-                {reference}
-             </div>
-          )}
-          {!isBible && reference && (
-             <div className="absolute bottom-0 left-0 right-0 z-20 text-center text-white/50 font-medium text-xl drop-shadow-md pb-2">
+          {reference && (
+             <div className={`absolute z-20 text-white font-bold drop-shadow-lg ${isBible ? 'top-8 right-12 text-4xl' : 'bottom-4 left-0 right-0 text-center text-xl text-white/60'}`}>
                 {reference}
              </div>
           )}
 
-          {/* Texte projeté */}
           <div 
-            className="absolute inset-0 flex items-center justify-center flex-col p-12 z-10 w-full h-full"
+            className="absolute inset-0 flex flex-col p-12 z-10 w-full h-full"
             style={{ 
               fontFamily: textSettings?.fontFamily,
-              textAlign: textSettings?.align as any,
+              justifyContent: textSettings?.valign === 'middle' ? 'center' : textSettings?.valign === 'bottom' ? 'flex-end' : 'flex-start',
               alignItems: textSettings?.align === 'center' ? 'center' : textSettings?.align === 'left' ? 'flex-start' : 'flex-end',
             }}
           >
-            <div className="flex-1 flex flex-col justify-center w-full">
+            <div 
+              className="flex flex-col"
+              style={{
+                width: `${textSettings?.contentWidth || 100}%`,
+                textAlign: textSettings?.align as any,
+                alignItems: textSettings?.align === 'center' ? 'center' : textSettings?.align === 'left' ? 'flex-start' : 'flex-end',
+              }}
+            >
               {lines.map((line, i) => (
                 <p 
                    key={i} 
-                   className={`text-white font-bold w-full drop-shadow-[0_4px_4px_rgba(0,0,0,0.8)] ${textSettings?.isItalic ? 'italic' : ''} ${textSettings?.isUnderline ? 'underline' : ''}`} 
+                   className={`text-white font-bold w-full drop-shadow-[0_8px_8px_rgba(0,0,0,1)] ${textSettings?.isItalic ? 'italic' : ''} ${textSettings?.isUnderline ? 'underline' : ''}`} 
                    style={{ 
                      fontWeight: textSettings?.isBold ? 'bold' : 'normal',
-                     fontSize: `${(textSettings?.fontSize || 100) / 100 * 6}vh`,
-                     lineHeight: '1.4'
+                     fontSize: `${(textSettings?.fontSize || 100) / 100 * 7}vh`,
+                     lineHeight: textSettings?.lineHeight || 1.4
                    }}
                    dangerouslySetInnerHTML={{ __html: line.replace(/<\/?[^>]+(>|$)/g, "") }}
                 />
@@ -175,10 +215,6 @@ export function LiveView() {
             </div>
           </div>
       </div>
-
-      {!isContentHidden && lines.length === 0 && !mediaOverlay && (
-         <div className="absolute inset-0 bg-black/60 z-20 transition-opacity duration-1000"></div>
-      )}
     </div>
   );
 }
