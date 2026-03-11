@@ -210,25 +210,42 @@ function App() {
   };
 
   // LIVE FEATURES: Clock and Ticker
-  const [clockSettings, setClockSettings] = useState<any>({
-    enabled: false,
-    type: 'digital',
-    style: 'modern',
-    color: '#ffffff',
-    size: 60, // Doubled default size
-    position: 'top-right'
+  const [clockSettings, setClockSettings] = useState<any>(() => {
+    const saved = localStorage.getItem('clockSettings');
+    return saved ? JSON.parse(saved) : {
+      enabled: false,
+      type: 'digital',
+      style: 'modern',
+      color: '#ffffff',
+      size: 60,
+      position: 'top-right'
+    };
   });
-  const [tickerSettings, setTickerSettings] = useState<any>({
-    enabled: false,
-    message: "Bienvenue à tous !",
-    speed: 1000,
-    color: '#ffff00',
-    bgColor: '#000000',
-    bgOpacity: 0.7,
-    position: 'bottom',
-    fontSize: 28,
-    fontFamily: 'Inter'
+
+  const [tickerSettings, setTickerSettings] = useState<any>(() => {
+    const saved = localStorage.getItem('tickerSettings');
+    const defaultTicker = {
+      enabled: false,
+      message: "Bienvenue à tous !",
+      color: '#ffff00',
+      bgColor: '#000000',
+      bgOpacity: 0.7,
+      position: 'bottom',
+      fontSize: 28,
+      fontFamily: 'Inter'
+    };
+    if (!saved) return defaultTicker;
+    const parsed = JSON.parse(saved);
+    return { ...parsed, message: defaultTicker.message }; // Keep default message as per user request
   });
+
+  useEffect(() => {
+    localStorage.setItem('clockSettings', JSON.stringify(clockSettings));
+  }, [clockSettings]);
+
+  useEffect(() => {
+    localStorage.setItem('tickerSettings', JSON.stringify(tickerSettings));
+  }, [tickerSettings]);
 
   const computedLiveSettings = useMemo(() =>
     getComputedSettingsForVerse(projectedSong, projectedVerseIdx, isBaseScreenProjected, liveCategory),
@@ -258,7 +275,7 @@ function App() {
     let mediaObj: any = null;
 
     if (!isBaseScreenProjected && projectedSong) {
-      if (['image', 'video', 'document'].includes(projectedSong.type)) {
+      if (['image', 'video', 'document', 'audio', 'youtube', 'link'].includes(projectedSong.type)) {
         mediaObj = { type: projectedSong.type, url: projectedSong.lyrics };
       } else {
         const verses = projectedSong.lyrics.split(/\n\s*\n/);

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { Star, AlertCircle, Presentation, MonitorOff } from 'lucide-react';
+import { Star, AlertCircle, Presentation, MonitorOff, Headphones, Youtube, Globe } from 'lucide-react';
+import { convertFileSrc } from '@tauri-apps/api/core';
 
 export function RightProjection({ 
   activeSong, projectedSong, projectedVerseIdx, bgImage, textSettings, 
@@ -10,12 +11,18 @@ export function RightProjection({
   const verses = activeSong?.lyrics?.split(/\n\s*\n/) || [];
   
   const cleanUrl = (url: string) => {
-    if (!url) return "";
-    try {
-      return decodeURIComponent(url);
-    } catch(e) {
+    if (!url || url === '' || url === 'null') return '';
+    // Already a converted asset or web URL - pass through
+    if (url.startsWith('asset:') || url.startsWith('http') || url.startsWith('tauri:')) {
       return url;
     }
+    // Public backgrounds served by Vite dev server
+    if (url.startsWith('/backgrounds/')) return url;
+    // Absolute filesystem path (Linux: starts with /, Windows: has drive letter like C:\)
+    if (url.startsWith('/') || url.match(/^[A-Za-z]:\\/)) {
+      return convertFileSrc(url);
+    }
+    return url;
   };
 
   useEffect(() => {
@@ -101,9 +108,14 @@ export function RightProjection({
                 <AlertCircle size={32} />
                 <p className="text-xs text-center">Sélectionnez un contenu pour le préparer</p>
              </div>
-          ) : (activeSong.type === 'image' || activeSong.type === 'video' || activeSong.type === 'document') ? (
+          ) : (activeSong.type === 'image' || activeSong.type === 'video' || activeSong.type === 'document' || activeSong.type === 'audio' || activeSong.type === 'youtube' || activeSong.type === 'link') ? (
              <div className="group flex flex-col items-center justify-center bg-[#36393f] hover:bg-[#4752c4] text-gray-300 hover:text-white rounded cursor-pointer transition border border-transparent hover:border-[#5865f2] overflow-hidden p-6 gap-3" onClick={() => onProject(activeSong, 0)}>
-                <div className="font-bold text-lg text-center">Projeter l'élément</div>
+                <div className="flex items-center gap-2">
+                   {activeSong.type === 'audio' && <Headphones size={24} className="animate-bounce" />}
+                   {activeSong.type === 'youtube' && <Youtube size={24} className="text-red-500" />}
+                   {activeSong.type === 'link' && <Globe size={24} className="text-blue-400" />}
+                   <div className="font-bold text-lg text-center">Projeter l'élément</div>
+                </div>
                 <div className="text-xs opacity-70 text-center bg-black/20 p-2 rounded max-w-full truncate">{activeSong.title}</div>
              </div>
           ) : verses.map((verse: string, idx: number) => {
@@ -140,10 +152,28 @@ export function RightProjection({
                )}
                
                <div className="absolute inset-0 flex items-center justify-center flex-col p-4 z-10">
-                  {['image', 'video', 'document'].includes(projectedSong.type) ? (
+                  {['image', 'video', 'document', 'audio', 'youtube', 'link'].includes(projectedSong.type) ? (
                      <div className="w-full h-full flex items-center justify-center z-20 absolute inset-0 bg-black">
                         {projectedSong.type === 'image' && <img src={projectedSong.lyrics} className="w-full h-full object-contain" alt="Media" />}
-                        {projectedSong.type === 'video' && <video key={projectedSong.lyrics} src={cleanUrl(projectedSong.lyrics)} className="w-full h-full object-contain" controls autoPlay playsInline preload="auto" />}
+                        {projectedSong.type === 'video' && <video key={projectedSong.lyrics} src={cleanUrl(projectedSong.lyrics)} className="w-full h-full object-contain" autoPlay muted playsInline preload="auto" />}
+                        {projectedSong.type === 'audio' && (
+                          <div className="flex flex-col items-center gap-1">
+                             <Headphones size={16} className="text-green-400 animate-pulse" />
+                             <span className="text-[6px] text-gray-500">Lecture Audio...</span>
+                          </div>
+                        )}
+                        {projectedSong.type === 'youtube' && (
+                           <div className="w-full h-full bg-black flex flex-col items-center justify-center gap-1">
+                              <Youtube size={16} className="text-red-500" />
+                              <span className="text-[6px] text-white">Prêt pour YouTube</span>
+                           </div>
+                        )}
+                        {projectedSong.type === 'link' && (
+                           <div className="w-full h-full bg-white flex flex-col items-center justify-center gap-1">
+                              <Globe size={16} className="text-blue-500" />
+                              <span className="text-[6px] text-gray-800">Lien Web</span>
+                           </div>
+                        )}
                      </div>
                   ) : (
                      <div 

@@ -1,7 +1,167 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, memo } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
+
+const RenderClock = memo(({ clock, currentTime }: { clock: any, currentTime: Date }) => {
+  if (!clock.enabled) return null;
+  const timeStr = currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  const posClasses: any = {
+    'top-left': 'top-4 left-4',
+    'top-right': 'top-4 right-4',
+    'bottom-left': 'bottom-4 left-4',
+    'bottom-right': 'bottom-4 right-4',
+    'center': 'top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2'
+  };
+
+  if (clock.type === 'analog') {
+    const seconds = currentTime.getSeconds();
+    const minutes = currentTime.getMinutes();
+    const hours = currentTime.getHours();
+    const baseSize = clock.size || 60;
+
+    const renderTicks = () => {
+      if (clock.style === 'minimal') return null;
+      return [...Array(12)].map((_, i) => (
+        <div key={i} className="absolute top-1/2 left-1/2 w-0.5 h-1"
+          style={{
+            height: clock.style === 'sport' ? '8px' : '4px',
+            backgroundColor: clock.color || 'white',
+            transformOrigin: 'center bottom',
+            transform: `translate(-50%, -100%) rotate(${i * 30}deg) translateY(-${baseSize - 5}px)`
+          }}></div>
+      ));
+    };
+
+    const renderNumbers = () => {
+      if (clock.style !== 'numbers') return null;
+      return [12, 3, 6, 9].map((num, i) => (
+        <div key={num} className="absolute font-bold text-[12px]"
+          style={{
+            color: clock.color || 'white',
+            top: '50%',
+            left: '50%',
+            transform: `translate(-50%, -50%) rotate(${i * 90}deg) translateY(-${baseSize - 18}px) rotate(-${i * 90}deg)`
+          }}>{num}</div>
+      ));
+    };
+
+    return (
+      <div className={`absolute ${posClasses[clock.position] || 'top-4 right-4'} z-50 flex items-center justify-center`}>
+        <div className={`rounded-full border-${clock.style === 'sport' ? '4' : '2'} relative`}
+          style={{
+            width: baseSize * 2, height: baseSize * 2,
+            borderColor: clock.color || 'white',
+            backgroundColor: 'rgba(0,0,0,0.3)',
+            boxShadow: clock.style === 'sport' ? '0 0 20px rgba(0,0,0,0.5)' : 'none'
+          }}>
+          {renderTicks()}
+          {renderNumbers()}
+          {/* Hour hand */}
+          <div className="absolute rounded-full"
+            style={{
+              bottom: '50%',
+              left: '50%',
+              width: '4px',
+              height: baseSize * 0.55,
+              backgroundColor: clock.color || 'white',
+              transformOrigin: 'bottom center',
+              transform: `translateX(-50%) rotate(${hours * 30 + minutes * 0.5}deg)`
+            }}></div>
+          {/* Minute hand */}
+          <div className="absolute rounded-full"
+            style={{
+              bottom: '50%',
+              left: '50%',
+              width: '3px',
+              height: baseSize * 0.8,
+              backgroundColor: clock.color || 'white',
+              transformOrigin: 'bottom center',
+              transform: `translateX(-50%) rotate(${minutes * 6}deg)`
+            }}></div>
+          {/* Second hand */}
+          <div className="absolute bg-red-500"
+            style={{
+              bottom: '50%',
+              left: '50%',
+              width: '1.5px',
+              height: baseSize * 0.9,
+              transformOrigin: 'bottom center',
+              transform: `translateX(-50%) rotate(${seconds * 6}deg)`
+            }}></div>
+          <div className="absolute top-1/2 left-1/2 w-2 h-2 rounded-full bg-white -translate-x-1/2 -translate-y-1/2" style={{ backgroundColor: clock.color || 'white' }}></div>
+        </div>
+      </div>
+    );
+  }
+
+  const clockStyle = {
+    color: clock.color || 'white',
+    fontSize: `${clock.size || 60}px`,
+    fontFamily: clock.style === 'classic' ? 'serif' : clock.style === 'neon' ? 'system-ui' : 'monospace',
+    textShadow: clock.style === 'neon' ? `0 0 10px ${clock.color || 'white'}, 0 0 20px ${clock.color || 'white'}` : '0 2px 10px rgba(0,0,0,0.8)',
+    background: clock.style === 'modern' ? 'rgba(0,0,0,0.3)' : 'transparent',
+    backdropFilter: clock.style === 'modern' ? 'blur(5px)' : 'none',
+    padding: clock.style === 'modern' ? '0.5rem 1rem' : '0',
+    borderRadius: '0.5rem'
+  };
+
+  return (
+    <div className={`absolute ${posClasses[clock.position] || 'top-4 right-4'} z-50`} style={clockStyle}>
+      {timeStr}
+    </div>
+  );
+});
+
+const RenderTicker = memo(({ ticker }: { ticker: any }) => {
+  if (!ticker.enabled || !ticker.message) return null;
+
+  const hexToRgba = (hex: string, opacity: number) => {
+    let r = 0, g = 0, b = 0;
+    const h = hex.replace('#', '');
+    if (h.length === 6) {
+      r = parseInt(h.slice(0, 2), 16);
+      g = parseInt(h.slice(2, 4), 16);
+      b = parseInt(h.slice(4, 6), 16);
+    }
+    return `rgba(${r}, ${g}, ${b}, ${opacity})`;
+  };
+
+  const bgColor = hexToRgba(ticker.bgColor || '#000000', ticker.bgOpacity ?? 0.7);
+
+  const calculateDuration = () => {
+    const msg = ticker.message || "";
+    const fontSize = ticker.fontSize || 28;
+    // Estimate message width (approx 0.6em per char) + screen width
+    const estimatedMsgWidth = msg.length * fontSize * 0.6;
+    const screenWidth = window.innerWidth;
+    const totalDistance = screenWidth + estimatedMsgWidth;
+    // 100 pixels per second for a very smooth and readable scroll
+    return totalDistance / 100;
+  };
+
+  return (
+    <div
+      className={`fixed left-0 right-0 ${ticker.position === 'top' ? 'top-0' : 'bottom-0'} z-[70] overflow-hidden w-full py-4 border-y border-white/10`}
+      style={{ backgroundColor: bgColor, color: ticker.color || 'yellow', pointerEvents: 'none' }}
+    >
+      <div
+        key={ticker.message}
+        className="animate-marquee whitespace-nowrap inline-block"
+        style={{
+          animationDuration: `${calculateDuration()}s`,
+          fontSize: `${ticker.fontSize || 28}px`,
+          fontFamily: ticker.fontFamily || 'Inter',
+          fontWeight: 'bold',
+          textShadow: '2px 2px 4px rgba(0,0,0,0.8)',
+        }}
+      >
+        {ticker.message}
+      </div>
+    </div>
+  );
+});
 
 export function LiveView() {
   const [lines, setLines] = useState<string[]>([]);
@@ -45,15 +205,15 @@ export function LiveView() {
   });
 
   const cleanUrl = (url: string) => {
-    if (!url || url === "" || url === "null") return undefined;
-    // Already an asset or web URL?
-    if (url.startsWith("asset:") || url.startsWith("http") || url.startsWith("https") || url.startsWith("tauri:")) {
+    if (!url || url === '' || url === 'null') return undefined;
+    // Already a converted asset or web URL - pass through
+    if (url.startsWith('asset:') || url.startsWith('http') || url.startsWith('tauri:')) {
       return url;
     }
-    // Shared public backgrounds
-    if (url.startsWith("/backgrounds/")) return url;
-    // Absolute paths (Linux/Windows)
-    if (url.startsWith("/") || url.includes(":\\")) {
+    // Public backgrounds served by Vite dev server
+    if (url.startsWith('/backgrounds/')) return url;
+    // Absolute filesystem path (Linux: starts with /, Windows: has drive letter like C:\)
+    if (url.startsWith('/') || url.match(/^[A-Za-z]:\\/)) {
       return convertFileSrc(url);
     }
     return url;
@@ -122,8 +282,18 @@ export function LiveView() {
       listen<'black' | 'white' | null>("update_live_overlay", (event) => setOverlayColor(event.payload)),
       listen<boolean>("toggle_live_camera", (event) => setIsCameraActive(event.payload)),
       listen<string>("set_camera_id", (event) => setCameraDeviceId(event.payload)),
-      listen<any>("update_live_clock", (event) => setClock(event.payload)),
-      listen<any>("update_live_ticker", (event) => setTicker(event.payload))
+      listen<any>("update_live_clock", (event) => {
+        setClock((prev: any) => {
+          if (JSON.stringify(prev) === JSON.stringify(event.payload)) return prev;
+          return event.payload;
+        });
+      }),
+      listen<any>("update_live_ticker", (event) => {
+        setTicker((prev: any) => {
+          if (JSON.stringify(prev) === JSON.stringify(event.payload)) return prev;
+          return event.payload;
+        });
+      })
     ];
 
     return () => {
@@ -172,154 +342,7 @@ export function LiveView() {
     } else { setTextContent(null); }
   }, [mediaOverlay]);
 
-  const RenderClock = () => {
-    if (!clock.enabled) return null;
-    const timeStr = currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-    const posClasses: any = {
-      'top-left': 'top-4 left-4',
-      'top-right': 'top-4 right-4',
-      'bottom-left': 'bottom-4 left-4',
-      'bottom-right': 'bottom-4 right-4',
-      'center': 'top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2'
-    };
-
-    if (clock.type === 'analog') {
-      const seconds = currentTime.getSeconds();
-      const minutes = currentTime.getMinutes();
-      const hours = currentTime.getHours();
-      const baseSize = clock.size || 60;
-
-      const renderTicks = () => {
-        if (clock.style === 'minimal') return null;
-        return [...Array(12)].map((_, i) => (
-          <div key={i} className="absolute top-1/2 left-1/2 w-0.5 h-1"
-            style={{
-              height: clock.style === 'sport' ? '8px' : '4px',
-              backgroundColor: clock.color || 'white',
-              transformOrigin: 'center bottom',
-              transform: `translate(-50%, -100%) rotate(${i * 30}deg) translateY(-${baseSize - 5}px)`
-            }}></div>
-        ));
-      };
-
-      const renderNumbers = () => {
-        if (clock.style !== 'numbers') return null;
-        return [12, 3, 6, 9].map((num, i) => (
-          <div key={num} className="absolute font-bold text-[12px]"
-            style={{
-              color: clock.color || 'white',
-              top: '50%',
-              left: '50%',
-              transform: `translate(-50%, -50%) rotate(${i * 90}deg) translateY(-${baseSize - 18}px) rotate(-${i * 90}deg)`
-            }}>{num}</div>
-        ));
-      };
-
-      return (
-        <div className={`absolute ${posClasses[clock.position] || 'top-4 right-4'} z-50 flex items-center justify-center`}>
-          <div className={`rounded-full border-${clock.style === 'sport' ? '4' : '2'} relative`}
-            style={{
-              width: baseSize * 2, height: baseSize * 2,
-              borderColor: clock.color || 'white',
-              backgroundColor: 'rgba(0,0,0,0.3)',
-              boxShadow: clock.style === 'sport' ? '0 0 20px rgba(0,0,0,0.5)' : 'none'
-            }}>
-            {renderTicks()}
-            {renderNumbers()}
-            {/* Hour hand */}
-            <div className="absolute rounded-full"
-              style={{
-                bottom: '50%',
-                left: '50%',
-                width: '4px',
-                height: baseSize * 0.55,
-                backgroundColor: clock.color || 'white',
-                transformOrigin: 'bottom center',
-                transform: `translateX(-50%) rotate(${hours * 30 + minutes * 0.5}deg)`
-              }}></div>
-            {/* Minute hand */}
-            <div className="absolute rounded-full"
-              style={{
-                bottom: '50%',
-                left: '50%',
-                width: '3px',
-                height: baseSize * 0.8,
-                backgroundColor: clock.color || 'white',
-                transformOrigin: 'bottom center',
-                transform: `translateX(-50%) rotate(${minutes * 6}deg)`
-              }}></div>
-            {/* Second hand */}
-            <div className="absolute bg-red-500"
-              style={{
-                bottom: '50%',
-                left: '50%',
-                width: '1.5px',
-                height: baseSize * 0.9,
-                transformOrigin: 'bottom center',
-                transform: `translateX(-50%) rotate(${seconds * 6}deg)`
-              }}></div>
-            <div className="absolute top-1/2 left-1/2 w-2 h-2 rounded-full bg-white -translate-x-1/2 -translate-y-1/2" style={{ backgroundColor: clock.color || 'white' }}></div>
-          </div>
-        </div>
-      );
-    }
-
-    const clockStyle = {
-      color: clock.color || 'white',
-      fontSize: `${clock.size || 60}px`,
-      fontFamily: clock.style === 'classic' ? 'serif' : clock.style === 'neon' ? 'system-ui' : 'monospace',
-      textShadow: clock.style === 'neon' ? `0 0 10px ${clock.color || 'white'}, 0 0 20px ${clock.color || 'white'}` : '0 2px 10px rgba(0,0,0,0.8)',
-      background: clock.style === 'modern' ? 'rgba(0,0,0,0.3)' : 'transparent',
-      backdropFilter: clock.style === 'modern' ? 'blur(5px)' : 'none',
-      padding: clock.style === 'modern' ? '0.5rem 1rem' : '0',
-      borderRadius: '0.5rem'
-    };
-
-    return (
-      <div className={`absolute ${posClasses[clock.position] || 'top-4 right-4'} z-50`} style={clockStyle}>
-        {timeStr}
-      </div>
-    );
-  };
-
-  const RenderTicker = () => {
-    if (!ticker.enabled || !ticker.message) return null;
-
-    const hexToRgba = (hex: string, opacity: number) => {
-      let r = 0, g = 0, b = 0;
-      const h = hex.replace('#', '');
-      if (h.length === 6) {
-        r = parseInt(h.slice(0, 2), 16);
-        g = parseInt(h.slice(2, 4), 16);
-        b = parseInt(h.slice(4, 6), 16);
-      }
-      return `rgba(${r}, ${g}, ${b}, ${opacity})`;
-    };
-
-    const bgColor = hexToRgba(ticker.bgColor || '#000000', ticker.bgOpacity ?? 0.7);
-
-    return (
-      <div
-        className={`fixed left-0 right-0 ${ticker.position === 'top' ? 'top-0' : 'bottom-0'} z-[70] overflow-hidden w-full py-4 border-y border-white/10`}
-        style={{ backgroundColor: bgColor, color: ticker.color || 'yellow', pointerEvents: 'none' }}
-      >
-        <div
-          className="animate-marquee whitespace-nowrap inline-block"
-          style={{
-            animationDuration: `${Math.max(60, 600 - (ticker.speed - 1) * 22.5)}s`,
-            fontSize: `${ticker.fontSize || 28}px`,
-            fontFamily: ticker.fontFamily || 'Inter',
-            fontWeight: 'bold',
-            textShadow: '2px 2px 4px rgba(0,0,0,0.8)',
-            paddingLeft: '100%'
-          }}
-        >
-          {ticker.message}
-        </div>
-      </div>
-    );
-  };
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-black flex items-center justify-center text-white select-none">
@@ -358,14 +381,34 @@ export function LiveView() {
       {overlayColor && <div className={`absolute inset-0 z-[100] ${overlayColor === 'black' ? 'bg-black' : 'bg-white'}`} />}
 
       {/* Clock & Ticker */}
-      <RenderClock />
-      <RenderTicker />
+      <RenderClock clock={clock} currentTime={currentTime} />
+      <RenderTicker ticker={ticker} />
 
       <div className={`absolute inset-0 w-full h-full transition-opacity duration-300 ${isContentHidden ? 'opacity-0' : 'opacity-100'}`}>
         {mediaOverlay && mediaOverlay.url && (
           <div className="absolute inset-0 z-30 bg-black flex items-center justify-center">
             {mediaOverlay.type === 'image' && <img src={cleanUrl(mediaOverlay.url)} className="w-full h-full object-contain" alt="Media" />}
             {mediaOverlay.type === 'video' && <video key={mediaOverlay.url} src={cleanUrl(mediaOverlay.url)} className="w-full h-full object-contain" autoPlay loop muted playsInline preload="auto" />}
+            {mediaOverlay.type === 'audio' && (
+              <div className="flex flex-col items-center gap-4">
+                <div className="w-32 h-32 bg-[#5865f2] rounded-full flex items-center justify-center animate-pulse">
+                  <svg className="w-16 h-16 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+                  </svg>
+                </div>
+                <audio key={mediaOverlay.url} src={cleanUrl(mediaOverlay.url)} autoPlay controls className="opacity-50 hover:opacity-100 transition" />
+              </div>
+            )}
+            {mediaOverlay.type === 'youtube' && (
+              <iframe 
+                width="100%" height="100%" 
+                src={`https://www.youtube.com/embed/${mediaOverlay.url}?autoplay=1&mute=0`} 
+                title="YouTube Video" frameBorder="0" 
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+                allowFullScreen
+              ></iframe>
+            )}
+            {mediaOverlay.type === 'link' && <iframe src={mediaOverlay.url} className="w-full h-full border-none bg-white" title="Web Link" />}
             {mediaOverlay.type === 'document' && (
               <div className="w-full h-full bg-white text-black overflow-hidden flex items-center justify-center">
                 {textContent ? <div className="p-10 whitespace-pre-wrap font-mono text-lg text-left w-full h-full overflow-y-auto">{textContent}</div> : <iframe src={cleanUrl(mediaOverlay.url)} className="w-full h-full border-none" title="Doc" />}
@@ -413,8 +456,8 @@ export function LiveView() {
       </div>
       <style>{`
         @keyframes marquee {
-          0% { transform: translateX(0); }
-          100% { transform: translateX(-1000%); }
+          0% { transform: translateX(100vw); }
+          100% { transform: translateX(-100%); }
         }
         .animate-marquee {
           animation: marquee linear infinite;

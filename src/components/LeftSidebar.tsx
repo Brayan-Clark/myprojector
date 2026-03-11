@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Save, FolderOpen, X, BookOpen, Music, Search as SearchIcon, List, Download, Plus, Trash2, ChevronUp, ChevronDown, FileText, Image as ImageIcon, Video, Type, Settings, Heart } from 'lucide-react';
+import { Save, FolderOpen, X, BookOpen, Music, Search as SearchIcon, List, Download, Plus, Trash2, ChevronUp, ChevronDown, FileText, Image as ImageIcon, Video, Type, Settings, Heart, Headphones, Youtube, Globe } from 'lucide-react';
 import { Store } from './Store';
 import Fuse from 'fuse.js';
 import { invoke } from '@tauri-apps/api/core';
@@ -151,34 +151,76 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
   const addMediaItem = async (type: 'image' | 'video') => {
     try {
         const { open } = await import('@tauri-apps/plugin-dialog');
-        const { convertFileSrc } = await import('@tauri-apps/api/core');
         const file = await open({
           multiple: false,
           filters: type === 'image' ? [{ name: 'Images', extensions: ['png', 'jpeg', 'jpg', 'webp', 'gif'] }] : [{ name: 'Videos', extensions: ['mp4', 'webm', 'ogg', 'mov', 'mkv', 'avi', 'm4v'] }]
         });
         if (file && typeof file === 'string') {
-          const assetUrl = convertFileSrc(file);
+          // Copy to public/media/ for HTTP access (required on Linux - asset:// doesn't support Range requests)
+          const httpUrl: string = await invoke('import_media', { sourcePath: file });
           const filename = file.split(/[/\\]/).pop() || 'Media';
-          const newItem = { id: Date.now().toString(), title: filename, number: type === 'image' ? '🖼️' : '🎬', lyrics: assetUrl, type: type };
+          const newItem = { id: Date.now().toString(), title: filename, number: type === 'image' ? '🖼️' : '🎬', lyrics: httpUrl, type: type };
           setPlaylist([...playlist, newItem]);
         }
-    } catch(e) { console.error(e) }
+    } catch(e) { console.error('addMediaItem error:', e); alert('Erreur: ' + e); }
   };
 
   const addFileItem = async () => {
     try {
         const { open } = await import('@tauri-apps/plugin-dialog');
-        const { convertFileSrc } = await import('@tauri-apps/api/core');
         const file = await open({
           multiple: false,
           filters: [{ name: 'Documents', extensions: ['pdf', 'doc', 'docx', 'ppt', 'pptx', 'txt', 'md'] }]
         });
         if (file && typeof file === 'string') {
-          const assetUrl = convertFileSrc(file);
+          const httpUrl: string = await invoke('import_media', { sourcePath: file });
           const filename = file.split(/[/\\]/).pop() || 'Document';
-          const newItem = { id: Date.now().toString(), title: filename, number: '📄', lyrics: assetUrl, type: 'document' };
+          const newItem = { id: Date.now().toString(), title: filename, number: '📄', lyrics: httpUrl, type: 'document' };
           setPlaylist([...playlist, newItem]);
         }
+    } catch(e) { console.error('addFileItem error:', e); alert('Erreur: ' + e); }
+  };
+
+  const addAudioItem = async () => {
+    try {
+        const { open } = await import('@tauri-apps/plugin-dialog');
+        const file = await open({
+          multiple: false,
+          filters: [{ name: 'Audio', extensions: ['mp3', 'wav', 'ogg', 'm4a'] }]
+        });
+        if (file && typeof file === 'string') {
+          const httpUrl: string = await invoke('import_media', { sourcePath: file });
+          const filename = file.split(/[/\\]/).pop() || 'Audio';
+          const newItem = { id: Date.now().toString(), title: filename, number: '🎵', lyrics: httpUrl, type: 'audio' };
+          setPlaylist([...playlist, newItem]);
+        }
+    } catch(e) { console.error('addAudioItem error:', e); alert('Erreur: ' + e); }
+  };
+
+  const addYoutubeItem = async () => {
+    try {
+      const url = window.prompt('Entrez l\'URL YouTube');
+      if (url) {
+        // Extract video ID if possible
+        let videoId = url;
+        const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+        const match = url.match(regExp);
+        if (match && match[2].length === 11) {
+          videoId = match[2];
+        }
+        const newItem = { id: Date.now().toString(), title: "YouTube Video", number: '📺', lyrics: videoId, type: 'youtube' };
+        setPlaylist([...playlist, newItem]);
+      }
+    } catch(e) { console.error(e) }
+  };
+
+  const addLinkItem = async () => {
+    try {
+      const url = window.prompt('Entrez l\'URL Web');
+      if (url) {
+        const newItem = { id: Date.now().toString(), title: url, number: '🌐', lyrics: url, type: 'link' };
+        setPlaylist([...playlist, newItem]);
+      }
     } catch(e) { console.error(e) }
   };
 
@@ -210,9 +252,12 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
                <div className="absolute top-full right-0 mt-1 w-48 bg-[#2b2d31] border border-[#36393f] rounded shadow-xl z-50 py-1">
                  <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addToAgenda(); setShowAddMenu(false); }}><Music size={12} /> Sélection</button>
                  <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addCustomItem(); setShowAddMenu(false); }}><Type size={12} /> Libre</button>
-                 <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addMediaItem('image'); setShowAddMenu(false); }}><ImageIcon size={12} /> Image</button>
-                 <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addMediaItem('video'); setShowAddMenu(false); }}><Video size={12} /> Vidéo</button>
-                 <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addFileItem(); setShowAddMenu(false); }}><FileText size={12} /> Fichier</button>
+                  <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addMediaItem('image'); setShowAddMenu(false); }}><ImageIcon size={12} /> Image</button>
+                  <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addMediaItem('video'); setShowAddMenu(false); }}><Video size={12} /> Vidéo</button>
+                  <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addAudioItem(); setShowAddMenu(false); }}><Headphones size={12} /> Audio</button>
+                  <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addYoutubeItem(); setShowAddMenu(false); }}><Youtube size={12} /> YouTube</button>
+                  <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addLinkItem(); setShowAddMenu(false); }}><Globe size={12} /> Lien Web</button>
+                  <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addFileItem(); setShowAddMenu(false); }}><FileText size={12} /> Fichier</button>
                </div>
              )}
              <button className="p-1 hover:bg-[#3f4147] rounded text-gray-400 hover:text-white transition" onClick={handleLoadAgenda}><FolderOpen size={14} /></button>
@@ -227,7 +272,14 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
             className={`px-2 py-1.5 rounded hover:bg-[#36393f] cursor-pointer flex items-center gap-2 group transition text-sm ${activeSong?.id === item.id ? 'bg-[#36393f] border-l-2 border-[#5865f2]' : 'border-l-2 border-transparent'}`}
             onClick={() => onSelectSong(item, item.type === 'bible' ? 'bible' : 'hymnes')}
           >
-            <Music size={12} className="text-[#5865f2] shrink-0" />
+            {item.type === 'image' && <ImageIcon size={12} className="text-pink-400 shrink-0" />}
+            {item.type === 'video' && <Video size={12} className="text-purple-400 shrink-0" />}
+            {item.type === 'audio' && <Headphones size={12} className="text-green-400 shrink-0" />}
+            {item.type === 'youtube' && <Youtube size={12} className="text-red-500 shrink-0" />}
+            {item.type === 'link' && <Globe size={12} className="text-blue-400 shrink-0" />}
+            {item.type === 'document' && <FileText size={12} className="text-orange-400 shrink-0" />}
+            {item.type === 'custom' && <Type size={12} className="text-yellow-400 shrink-0" />}
+            {(!item.type || item.type === 'bible' || item.type === 'hymnes') && <Music size={12} className="text-[#5865f2] shrink-0" />}
             <span className="text-gray-400 w-8 shrink-0">{item.number}</span>
             <span className="text-gray-200 truncate flex-1">{item.title}</span>
             <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
