@@ -252,6 +252,42 @@ fn list_backgrounds() -> Result<Vec<String>, String> {
     Ok(files)
 }
 
+#[tauri::command]
+fn import_background(source_path: String) -> Result<String, String> {
+    let mut dest_dir = std::env::current_dir().map_err(|e| e.to_string())?;
+    dest_dir.push("data");
+    dest_dir.push("backgrounds");
+
+    if !dest_dir.exists() {
+        fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+    }
+
+    let src = std::path::Path::new(&source_path);
+    let filename = src.file_name().ok_or("Invalid filename")?;
+    let mut dest_path = dest_dir.clone();
+    dest_path.push(filename);
+
+    fs::copy(src, &dest_path).map_err(|e| e.to_string())?;
+    
+    Ok(dest_path.to_str().unwrap_or("").to_string())
+}
+
+#[tauri::command]
+fn delete_background(file_path: String) -> Result<(), String> {
+    let path = std::path::Path::new(&file_path);
+    // Basal security check: verify if it's inside data/backgrounds
+    let mut bg_dir = std::env::current_dir().map_err(|e| e.to_string())?;
+    bg_dir.push("data");
+    bg_dir.push("backgrounds");
+    
+    if path.starts_with(&bg_dir) && path.exists() {
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+        Ok(())
+    } else {
+        Err("Unauthorized or file does not exist".to_string())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -274,7 +310,9 @@ pub fn run() {
             list_dbs,
             download_db,
             delete_db,
-            list_backgrounds
+            list_backgrounds,
+            import_background,
+            delete_background
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

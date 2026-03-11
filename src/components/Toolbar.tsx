@@ -1,10 +1,10 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight, 
   MonitorOff, Play, Image, Video, Plus, StopCircle, 
   Settings2, Trash2, EyeOff, Eye, Presentation,
   AlignVerticalJustifyCenter, AlignVerticalJustifyStart, AlignVerticalJustifyEnd,
-  ChevronDown, Camera, Type, List
+  ChevronDown, Camera, Type, List, Clock, MessageSquare
 } from 'lucide-react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 
@@ -15,17 +15,20 @@ export function Toolbar({
   editingScope, setEditingScope, activeSong, activeVerseIdx, activeCategory, 
   clearSpecificSettings, isContentHidden, setIsContentHidden, isBaseScreenProjected, 
   setIsBaseScreenProjected, cameraList, selectedCamera, setSelectedCamera,
-  isCameraActive, setIsCameraActive
+  isCameraActive, setIsCameraActive,
+  clockSettings, setClockSettings,
+  tickerSettings, setTickerSettings
 }: any) {
-  const [activeMediaMenu, setActiveMediaMenu] = useState<'image' | 'video' | null>(null);
+  const [activeMediaMenu, setActiveMediaMenu] = useState<'image' | 'video' | 'clock' | 'ticker' | null>(null);
   const [showFontDropdown, setShowFontDropdown] = useState(false);
-  const [customBgs, setCustomBgs] = useState<string[]>([]);
+  const [customBgs, setCustomBgs] = useState<string[]>([]); // Stores absolute paths
 
   const fontSizes = [50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 180, 200, 250, 300];
 
   const isVideoUrl = (url: string) => url.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i);
 
   const defaultBgs = [
+    { name: 'Motion Dark', url: '/backgrounds/motion_dark.mp4' },
     { name: 'Sunset', url: '/backgrounds/sunset.jpg' },
     { name: 'Tree', url: '/backgrounds/tree.png' },
   ];
@@ -38,6 +41,8 @@ export function Toolbar({
   const handleAddCustomMedia = async (mediaType: 'image' | 'video') => {
     try {
       const { open } = await import('@tauri-apps/plugin-dialog');
+      const { invoke } = await import('@tauri-apps/api/core');
+      
       const file = await open({
         multiple: false,
         filters: mediaType === 'image' ? [{
@@ -48,28 +53,43 @@ export function Toolbar({
           extensions: ['mp4', 'webm', 'ogg', 'mov', 'mkv', 'avi', 'm4v']
         }]
       });
+      
       if (file && typeof file === 'string') {
-        const assetUrl = convertFileSrc(file);
-        setCustomBgs([...customBgs, assetUrl]);
-        handleBgSelect(assetUrl);
+        // Copy to internal data folder
+        const internalPath: string = await invoke('import_background', { sourcePath: file });
+        loadBackgrounds();
+        handleBgSelect(convertFileSrc(internalPath));
       }
     } catch (e) { console.error(e) }
+  };
+
+  const handleDeleteCustomMedia = async (e: React.MouseEvent, path: string) => {
+    e.stopPropagation();
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const { confirm } = await import('@tauri-apps/plugin-dialog');
+      
+      const ok = await confirm("Voulez-vous vraiment supprimer cet élément de la bibliothèque ?", { title: "Suppression", kind: 'warning' });
+      if (ok) {
+        await invoke('delete_background', { filePath: path });
+        loadBackgrounds();
+      }
+    } catch (e) { console.error(e) }
+  };
+
+  const loadBackgrounds = async () => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const files: string[] = await invoke('list_backgrounds');
+      setCustomBgs(files);
+    } catch (e) {
+      console.error("Failed to load local backgrounds", e);
+    }
   };
 
 
 
   useEffect(() => {
-    const loadBackgrounds = async () => {
-      try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const files: string[] = await invoke('list_backgrounds');
-        const { convertFileSrc } = await import('@tauri-apps/api/core');
-        const assetUrls = files.map(f => convertFileSrc(f));
-        setCustomBgs(assetUrls);
-      } catch (e) {
-        console.error("Failed to load local backgrounds", e);
-      }
-    };
     loadBackgrounds();
   }, []);
 
@@ -198,7 +218,14 @@ export function Toolbar({
                 <div className="flex justify-between items-center mb-2 px-1 text-[10px] font-bold text-gray-400 uppercase">Bibliothèque <button onClick={() => handleAddCustomMedia('image')} className="text-[#5865f2] hover:text-[#4752c4]"><Plus size={14} /></button></div>
                 <div className="grid grid-cols-2 gap-2">
                   {defaultBgs.map(bg => <div key={bg.url} onClick={() => handleBgSelect(bg.url)} className="aspect-video bg-black overflow-hidden rounded border border-transparent hover:border-[#5865f2] transition cursor-pointer"><img src={bg.url} className="w-full h-full object-cover" /></div>)}
-                  {customBgs.filter(url => !isVideoUrl(url)).map((url, i) => <div key={i} onClick={() => handleBgSelect(url)} className="aspect-video bg-black overflow-hidden rounded border border-transparent hover:border-[#5865f2] transition cursor-pointer"><img src={url} className="w-full h-full object-cover" /></div>)}
+                  {customBgs.filter(path => !isVideoUrl(path)).map((path, i) => (
+                    <div key={i} onClick={() => handleBgSelect(convertFileSrc(path))} className="aspect-video bg-black overflow-hidden rounded border border-transparent hover:border-[#5865f2] transition cursor-pointer relative group">
+                      <img src={convertFileSrc(path)} className="w-full h-full object-cover" />
+                      <button onClick={(e) => handleDeleteCustomMedia(e, path)} className="absolute top-1 right-1 p-1 bg-red-600/80 text-white rounded opacity-0 group-hover:opacity-100 transition hover:bg-red-600">
+                        <Trash2 size={10} />
+                      </button>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
@@ -211,7 +238,15 @@ export function Toolbar({
               <div className="absolute top-full left-0 mt-2 bg-[#2b2d31] border border-[#1e1f22] shadow-2xl rounded p-2 z-50 w-64 overflow-y-auto max-h-64">
                 <div className="flex justify-between items-center mb-2 px-1 text-[10px] font-bold text-gray-400 uppercase">Fonds Vidéo <button onClick={() => handleAddCustomMedia('video')} className="text-[#5865f2] hover:text-[#4752c4]"><Plus size={14} /></button></div>
                 <div className="grid grid-cols-2 gap-2">
-                  {customBgs.filter(url => isVideoUrl(url)).map((url, i) => <div key={i} onClick={() => handleBgSelect(url)} className="aspect-video bg-black overflow-hidden rounded border border-transparent hover:border-[#5865f2] transition cursor-pointer relative"><video src={url} className="w-full h-full object-cover" muted /><div className="absolute inset-0 flex items-center justify-center text-white/50"><Play size={20} /></div></div>)}
+                  {customBgs.filter(path => isVideoUrl(path)).map((path, i) => (
+                    <div key={i} onClick={() => handleBgSelect(convertFileSrc(path))} className="aspect-video bg-black overflow-hidden rounded border border-transparent hover:border-[#5865f2] transition cursor-pointer relative group">
+                      <video src={convertFileSrc(path)} className="w-full h-full object-cover" muted />
+                      <div className="absolute inset-0 flex items-center justify-center text-white/40"><Play size={20} /></div>
+                      <button onClick={(e) => handleDeleteCustomMedia(e, path)} className="absolute top-1 right-1 p-1 bg-red-600/80 text-white rounded opacity-0 group-hover:opacity-100 transition hover:bg-red-600">
+                        <Trash2 size={10} />
+                      </button>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
@@ -238,7 +273,7 @@ export function Toolbar({
                     emit('set_camera_id', e.target.value);
                  }}
                >
-                  {cameraList.map(c => <option key={c.deviceId} value={c.deviceId}>{c.label || 'Caméra'}</option>)}
+                   {cameraList.map((c: any) => <option key={c.deviceId} value={c.deviceId}>{c.label || 'Caméra'}</option>)}
                </select>
             )}
           </div>
@@ -254,6 +289,157 @@ export function Toolbar({
               await emit('update_live_lyrics', { lines: [], reference: "" });
               await emit('update_live_media', null);
           }}><Presentation size={12} /></button>
+        </div>
+      </div>
+
+      <div className="w-px h-10 bg-[#1e1f22]"></div>
+
+      {/* Group: Extra Features */}
+      <div className="flex flex-col gap-1">
+        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Projection +</span>
+        <div className="flex items-center gap-1 bg-[#1e1f22] p-1 rounded-md">
+           <div className="relative">
+              <button 
+                className={`p-1.5 rounded transition ${clockSettings.enabled ? 'bg-[#5865f2] text-white' : 'hover:bg-[#3f4147] text-gray-400'}`} 
+                onClick={() => setActiveMediaMenu(activeMediaMenu === 'clock' ? null : 'clock')}
+              >
+                <Clock size={16} />
+              </button>
+              {activeMediaMenu === 'clock' && (
+                <div className="absolute top-full left-0 mt-2 bg-[#2b2d31] border border-[#1e1f22] shadow-2xl rounded p-3 z-50 w-64 space-y-3">
+                   <div className="flex justify-between items-center text-[10px] font-bold text-[#5865f2] uppercase">Options Horloge</div>
+                   <div className="flex items-center justify-between">
+                      <span className="text-xs">Activé</span>
+                      <input type="checkbox" checked={clockSettings.enabled} onChange={(e) => setClockSettings({...clockSettings, enabled: e.target.checked})} />
+                   </div>
+                   <div className="grid grid-cols-2 gap-2">
+                      <button className={`text-[10px] py-1 rounded border ${clockSettings.type === 'digital' ? 'bg-[#5865f2] border-white' : 'border-[#36393f]'}`} onClick={() => setClockSettings({...clockSettings, type: 'digital', style: 'modern'})}>Digital</button>
+                      <button className={`text-[10px] py-1 rounded border ${clockSettings.type === 'analog' ? 'bg-[#5865f2] border-white' : 'border-[#36393f]'}`} onClick={() => setClockSettings({...clockSettings, type: 'analog', style: 'minimal'})}>Analogue</button>
+                   </div>
+                   <div className="space-y-1">
+                      <span className="text-[10px] text-gray-400">Style</span>
+                      <select 
+                        className="w-full bg-[#1e1f22] text-[10px] text-gray-200 border border-[#36393f] rounded p-1 appearance-none" 
+                        style={{ backgroundImage: `url('data:image/svg+xml;utf8,<svg fill="currentColor" height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg"><path d="M7 10l5 5 5-5z" fill="%239CA3AF"/></svg>')`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 2px center', backgroundSize: '10px' }}
+                        value={clockSettings.style} 
+                        onChange={(e) => setClockSettings({...clockSettings, style: e.target.value})}
+                      >
+                         {clockSettings.type === 'digital' ? (
+                           <>
+                             <option value="modern" className="bg-[#2b2d31]">Moderne</option>
+                             <option value="classic" className="bg-[#2b2d31]">Classique (Serif)</option>
+                             <option value="neon" className="bg-[#2b2d31]">Néon</option>
+                           </>
+                         ) : (
+                           <>
+                             <option value="minimal" className="bg-[#2b2d31]">Minimaliste</option>
+                             <option value="numbers" className="bg-[#2b2d31]">Avec Chiffres</option>
+                             <option value="sport" className="bg-[#2b2d31]">Sport / Bold</option>
+                           </>
+                         )}
+                      </select>
+                   </div>
+                   <div className="space-y-1">
+                      <div className="flex justify-between items-center">
+                         <span className="text-[10px] text-gray-400">Taille</span>
+                         <span className="text-[10px] text-[#5865f2] font-bold">{clockSettings.size}px</span>
+                      </div>
+                      <input type="range" min="20" max="300" value={clockSettings.size} onChange={(e) => setClockSettings({...clockSettings, size: parseInt(e.target.value)})} className="w-full h-1 accent-[#5865f2]" />
+                   </div>
+                   <div className="space-y-1">
+                      <span className="text-[10px] text-gray-400">Position</span>
+                      <select 
+                        className="w-full bg-[#1e1f22] text-[10px] text-gray-200 border border-[#36393f] rounded p-1.5 outline-none appearance-none cursor-pointer" 
+                        style={{ backgroundImage: `url('data:image/svg+xml;utf8,<svg fill="currentColor" height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg"><path d="M7 10l5 5 5-5z" fill="%239CA3AF"/></svg>')`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 4px center', backgroundSize: '12px' }}
+                        value={clockSettings.position} 
+                        onChange={(e) => setClockSettings({...clockSettings, position: e.target.value})}
+                      >
+                         <option value="top-right" className="bg-[#2b2d31]">Haut Droite</option>
+                         <option value="top-left" className="bg-[#2b2d31]">Haut Gauche</option>
+                         <option value="bottom-right" className="bg-[#2b2d31]">Bas Droite</option>
+                         <option value="bottom-left" className="bg-[#2b2d31]">Bas Gauche</option>
+                         <option value="center" className="bg-[#2b2d31]">Centre</option>
+                      </select>
+                   </div>
+                   <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-gray-400">Couleur</span>
+                      <input type="color" value={clockSettings.color} onChange={(e) => setClockSettings({...clockSettings, color: e.target.value})} className="w-8 h-4 bg-transparent border-none cursor-pointer" />
+                   </div>
+                </div>
+              )}
+           </div>
+
+           <div className="relative">
+              <button 
+                className={`p-1.5 rounded transition ${tickerSettings.enabled ? 'bg-[#5865f2] text-white' : 'hover:bg-[#3f4147] text-gray-400'}`} 
+                onClick={() => setActiveMediaMenu(activeMediaMenu === 'ticker' ? null : 'ticker')}
+              >
+                <MessageSquare size={16} />
+              </button>
+              {activeMediaMenu === 'ticker' && (
+                <div className="absolute top-full left-0 mt-2 bg-[#2b2d31] border border-[#1e1f22] shadow-2xl rounded p-3 z-50 w-72 space-y-3">
+                   <div className="flex justify-between items-center text-[10px] font-bold text-[#5865f2] uppercase">Message Défilant</div>
+                   <div className="flex items-center justify-between">
+                      <span className="text-xs">Activé</span>
+                      <input type="checkbox" checked={tickerSettings.enabled} onChange={(e) => setTickerSettings({...tickerSettings, enabled: e.target.checked})} />
+                   </div>
+                   <textarea 
+                     className="w-full bg-[#1e1f22] text-xs border border-[#36393f] rounded p-2 outline-none h-16 resize-none" 
+                     placeholder="Votre message ici..."
+                     value={tickerSettings.message}
+                     onChange={(e) => setTickerSettings({...tickerSettings, message: e.target.value})}
+                   />
+                   <div className="grid grid-cols-2 gap-3">
+                      <div className="flex flex-col gap-1">
+                         <span className="text-[10px] text-gray-400 uppercase font-black">Vitesse</span>
+                         <input type="range" min="1" max="25" value={tickerSettings.speed} onChange={(e) => setTickerSettings({...tickerSettings, speed: parseInt(e.target.value)})} className="h-1 accent-[#5865f2]" />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                         <span className="text-[10px] text-gray-400 uppercase font-black">Opacité Fond</span>
+                         <input type="range" min="0" max="1" step="0.1" value={tickerSettings.bgOpacity} onChange={(e) => setTickerSettings({...tickerSettings, bgOpacity: parseFloat(e.target.value)})} className="h-1 accent-[#5865f2]" />
+                      </div>
+                   </div>
+                   <div className="grid grid-cols-2 gap-3">
+                      <div className="flex flex-col gap-1">
+                         <span className="text-[10px] text-gray-400">Police</span>
+                         <select 
+                            className="w-full bg-[#1e1f22] text-[10px] text-gray-200 border border-[#36393f] rounded p-1 appearance-none" 
+                            style={{ backgroundImage: `url('data:image/svg+xml;utf8,<svg fill="currentColor" height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg"><path d="M7 10l5 5 5-5z" fill="%239CA3AF"/></svg>')`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 2px center', backgroundSize: '10px' }}
+                            value={tickerSettings.fontFamily} 
+                            onChange={(e) => setTickerSettings({...tickerSettings, fontFamily: e.target.value})}
+                         >
+                            <option value="Inter" className="bg-[#2b2d31]">Inter</option>
+                            <option value="Montserrat" className="bg-[#2b2d31]">Montserrat</option>
+                            <option value="Oswald" className="bg-[#2b2d31]">Oswald</option>
+                         </select>
+                      </div>
+                      <div className="flex flex-col gap-1">
+                         <span className="text-[10px] text-gray-400">Taille</span>
+                         <input type="number" className="w-full bg-[#1e1f22] text-[10px] border border-[#36393f] rounded p-1" value={tickerSettings.fontSize} onChange={(e) => setTickerSettings({...tickerSettings, fontSize: parseInt(e.target.value)})} />
+                      </div>
+                   </div>
+                   <div className="grid grid-cols-2 gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-gray-400">Texte</span>
+                        <input type="color" value={tickerSettings.color} onChange={(e) => setTickerSettings({...tickerSettings, color: e.target.value})} className="w-6 h-4 bg-transparent border-none cursor-pointer" />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-gray-400">Fond</span>
+                        <input type="color" value={tickerSettings.bgColor} onChange={(e) => setTickerSettings({...tickerSettings, bgColor: e.target.value})} className="w-6 h-4 bg-transparent border-none cursor-pointer" />
+                      </div>
+                   </div>
+                   <select 
+                    className="w-full bg-[#1e1f22] text-[10px] text-gray-200 border border-[#36393f] rounded p-1.5 outline-none appearance-none" 
+                    style={{ backgroundImage: `url('data:image/svg+xml;utf8,<svg fill="currentColor" height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg"><path d="M7 10l5 5 5-5z" fill="%239CA3AF"/></svg>')`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 4px center', backgroundSize: '12px' }}
+                    value={tickerSettings.position} 
+                    onChange={(e) => setTickerSettings({...tickerSettings, position: e.target.value})}
+                   >
+                      <option value="bottom" className="bg-[#2b2d31]">Bandeau en Bas</option>
+                      <option value="top" className="bg-[#2b2d31]">Bandeau en Haut</option>
+                   </select>
+                </div>
+              )}
+           </div>
         </div>
       </div>
 

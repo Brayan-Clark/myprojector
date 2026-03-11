@@ -1,21 +1,32 @@
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
+import { convertFileSrc } from "@tauri-apps/api/core";
 
 export function LiveView() {
   const [lines, setLines] = useState<string[]>([]);
   const [reference, setReference] = useState<string>("");
   const [isBible, setIsBible] = useState<boolean>(true);
   const [bgImage, setBgImage] = useState<string>(() => localStorage.getItem('live_bg') || "/backgrounds/sunset.jpg");
-  const [mediaOverlay, setMediaOverlay] = useState<{type: string, url: string} | null>(() => {
+  const [mediaOverlay, setMediaOverlay] = useState<{ type: string, url: string } | null>(() => {
     const saved = localStorage.getItem('live_media');
     return saved ? JSON.parse(saved) : null;
   });
   const [isContentHidden, setIsContentHidden] = useState<boolean>(false);
   const [overlayColor, setOverlayColor] = useState<'black' | 'white' | null>(null);
   const [textContent, setTextContent] = useState<string | null>(null);
-  const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
-  const [cameraDeviceId, setCameraDeviceId] = useState<string>("");
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [cameraDeviceId, setCameraDeviceId] = useState<string | null>(null);
+
+  // New features
+  const [clock, setClock] = useState<any>({ enabled: false, type: 'digital', position: 'top-right', style: 'modern' });
+  const [ticker, setTicker] = useState<any>({ enabled: false, message: '', position: 'bottom' });
+  const [currentTime, setCurrentTime] = useState(new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   const [textSettings, setTextSettings] = useState<any>(() => {
     const saved = localStorage.getItem('live_style');
@@ -30,16 +41,22 @@ export function LiveView() {
     try {
       const parsed = JSON.parse(saved);
       return Object.keys(parsed).length === 0 ? defaults : parsed;
-    } catch(e) { return defaults; }
+    } catch (e) { return defaults; }
   });
 
   const cleanUrl = (url: string) => {
-    if (!url) return "";
-    try {
-      return decodeURIComponent(url);
-    } catch(e) {
+    if (!url || url === "" || url === "null") return undefined;
+    // Already an asset or web URL?
+    if (url.startsWith("asset:") || url.startsWith("http") || url.startsWith("https") || url.startsWith("tauri:")) {
       return url;
     }
+    // Shared public backgrounds
+    if (url.startsWith("/backgrounds/")) return url;
+    // Absolute paths (Linux/Windows)
+    if (url.startsWith("/") || url.includes(":\\")) {
+      return convertFileSrc(url);
+    }
+    return url;
   };
 
   useEffect(() => {
@@ -48,15 +65,15 @@ export function LiveView() {
         const win = getCurrentWindow();
         await win.setFullscreen(true);
       } catch (e) { console.error(e); }
-      
+
       try {
-         const savedLyrics = localStorage.getItem('live_lyrics');
-         if (savedLyrics) {
-            const data = JSON.parse(savedLyrics);
-            setLines(data.lines || []);
-            setReference(data.reference || "");
-            setIsBible(data.isBible || false);
-         }
+        const savedLyrics = localStorage.getItem('live_lyrics');
+        if (savedLyrics) {
+          const data = JSON.parse(savedLyrics);
+          setLines(data.lines || []);
+          setReference(data.reference || "");
+          setIsBible(data.isBible || false);
+        }
       } catch (e) { console.error(e); }
 
       // Signal that we are ready to receive data
@@ -70,30 +87,30 @@ export function LiveView() {
       listen<any>("update_live_content", (event) => {
         const { lyrics, media } = event.payload;
         console.log("Atomic Content Update:", event.payload);
-        
+
         // 1. Update Media
         setMediaOverlay(media);
-        
+
         // 2. Update Lyrics
         if (media) {
-           setLines([]);
-           setReference("");
-           setIsBible(false);
+          setLines([]);
+          setReference("");
+          setIsBible(false);
         } else {
-           const payloadLines = lyrics.lines || [];
-           const ref = lyrics.reference || "";
-           const isBib = !!lyrics.isBible;
-           
-           setReference(ref);
-           setIsBible(isBib);
-           
-           let finalLines = payloadLines;
-           if (isBib && ref && finalLines.length > 1) {
-              if (/^\d+$/.test(finalLines[0].trim())) {
-                 finalLines = finalLines.slice(1);
-              }
-           }
-           setLines(finalLines);
+          const payloadLines = lyrics.lines || [];
+          const ref = lyrics.reference || "";
+          const isBib = !!lyrics.isBible;
+
+          setReference(ref);
+          setIsBible(isBib);
+
+          let finalLines = payloadLines;
+          if (isBib && ref && finalLines.length > 1) {
+            if (/^\d+$/.test(finalLines[0].trim())) {
+              finalLines = finalLines.slice(1);
+            }
+          }
+          setLines(finalLines);
         }
       }),
       listen<string>("update_live_bg", (event) => setBgImage(event.payload)),
@@ -102,9 +119,11 @@ export function LiveView() {
         setTextSettings(event.payload);
       }),
       listen<boolean>("update_live_hide_content", (event) => setIsContentHidden(event.payload)),
-      listen<'black'|'white'|null>("update_live_overlay", (event) => setOverlayColor(event.payload)),
+      listen<'black' | 'white' | null>("update_live_overlay", (event) => setOverlayColor(event.payload)),
       listen<boolean>("toggle_live_camera", (event) => setIsCameraActive(event.payload)),
-      listen<string>("set_camera_id", (event) => setCameraDeviceId(event.payload))
+      listen<string>("set_camera_id", (event) => setCameraDeviceId(event.payload)),
+      listen<any>("update_live_clock", (event) => setClock(event.payload)),
+      listen<any>("update_live_ticker", (event) => setTicker(event.payload))
     ];
 
     return () => {
@@ -115,32 +134,32 @@ export function LiveView() {
   useEffect(() => {
     let stream: MediaStream | null = null;
     const startCam = async () => {
-       if (isCameraActive) {
-          try {
-             const constraints = { 
-               video: cameraDeviceId ? { deviceId: { exact: cameraDeviceId }, width: 1920, height: 1080 } : { width: 1920, height: 1080 } 
-             };
-             stream = await navigator.mediaDevices.getUserMedia(constraints);
-             const vid = document.getElementById('live-camera-feed') as HTMLVideoElement;
-             if (vid) vid.srcObject = stream;
-          } catch (e) { 
-             console.error(e); 
-             // Fallback if ID fails
-             if (cameraDeviceId) {
-                try {
-                  stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1920, height: 1080 } });
-                  const vid = document.getElementById('live-camera-feed') as HTMLVideoElement;
-                  if (vid) vid.srcObject = stream;
-                } catch(e2) { setIsCameraActive(false); }
-             } else { setIsCameraActive(false); }
-          }
-       }
+      if (isCameraActive) {
+        try {
+          const constraints = {
+            video: cameraDeviceId ? { deviceId: { exact: cameraDeviceId }, width: 1920, height: 1080 } : { width: 1920, height: 1080 }
+          };
+          stream = await navigator.mediaDevices.getUserMedia(constraints);
+          const vid = document.getElementById('camera-video') as HTMLVideoElement;
+          if (vid) vid.srcObject = stream;
+        } catch (e) {
+          console.error(e);
+          // Fallback if ID fails
+          if (cameraDeviceId) {
+            try {
+              stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1920, height: 1080 } });
+              const vid = document.getElementById('camera-video') as HTMLVideoElement;
+              if (vid) vid.srcObject = stream;
+            } catch (e2) { setIsCameraActive(false); }
+          } else { setIsCameraActive(false); }
+        }
+      }
     };
     startCam();
     return () => {
-       if (stream) {
-          stream.getTracks().forEach(t => t.stop());
-       }
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+      }
     };
   }, [isCameraActive, cameraDeviceId]);
 
@@ -153,68 +172,255 @@ export function LiveView() {
     } else { setTextContent(null); }
   }, [mediaOverlay]);
 
+  const RenderClock = () => {
+    if (!clock.enabled) return null;
+    const timeStr = currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+    const posClasses: any = {
+      'top-left': 'top-4 left-4',
+      'top-right': 'top-4 right-4',
+      'bottom-left': 'bottom-4 left-4',
+      'bottom-right': 'bottom-4 right-4',
+      'center': 'top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2'
+    };
+
+    if (clock.type === 'analog') {
+      const seconds = currentTime.getSeconds();
+      const minutes = currentTime.getMinutes();
+      const hours = currentTime.getHours();
+      const baseSize = clock.size || 60;
+
+      const renderTicks = () => {
+        if (clock.style === 'minimal') return null;
+        return [...Array(12)].map((_, i) => (
+          <div key={i} className="absolute top-1/2 left-1/2 w-0.5 h-1"
+            style={{
+              height: clock.style === 'sport' ? '8px' : '4px',
+              backgroundColor: clock.color || 'white',
+              transformOrigin: 'center bottom',
+              transform: `translate(-50%, -100%) rotate(${i * 30}deg) translateY(-${baseSize - 5}px)`
+            }}></div>
+        ));
+      };
+
+      const renderNumbers = () => {
+        if (clock.style !== 'numbers') return null;
+        return [12, 3, 6, 9].map((num, i) => (
+          <div key={num} className="absolute font-bold text-[12px]"
+            style={{
+              color: clock.color || 'white',
+              top: '50%',
+              left: '50%',
+              transform: `translate(-50%, -50%) rotate(${i * 90}deg) translateY(-${baseSize - 18}px) rotate(-${i * 90}deg)`
+            }}>{num}</div>
+        ));
+      };
+
+      return (
+        <div className={`absolute ${posClasses[clock.position] || 'top-4 right-4'} z-50 flex items-center justify-center`}>
+          <div className={`rounded-full border-${clock.style === 'sport' ? '4' : '2'} relative`}
+            style={{
+              width: baseSize * 2, height: baseSize * 2,
+              borderColor: clock.color || 'white',
+              backgroundColor: 'rgba(0,0,0,0.3)',
+              boxShadow: clock.style === 'sport' ? '0 0 20px rgba(0,0,0,0.5)' : 'none'
+            }}>
+            {renderTicks()}
+            {renderNumbers()}
+            {/* Hour hand */}
+            <div className="absolute rounded-full"
+              style={{
+                bottom: '50%',
+                left: '50%',
+                width: '4px',
+                height: baseSize * 0.55,
+                backgroundColor: clock.color || 'white',
+                transformOrigin: 'bottom center',
+                transform: `translateX(-50%) rotate(${hours * 30 + minutes * 0.5}deg)`
+              }}></div>
+            {/* Minute hand */}
+            <div className="absolute rounded-full"
+              style={{
+                bottom: '50%',
+                left: '50%',
+                width: '3px',
+                height: baseSize * 0.8,
+                backgroundColor: clock.color || 'white',
+                transformOrigin: 'bottom center',
+                transform: `translateX(-50%) rotate(${minutes * 6}deg)`
+              }}></div>
+            {/* Second hand */}
+            <div className="absolute bg-red-500"
+              style={{
+                bottom: '50%',
+                left: '50%',
+                width: '1.5px',
+                height: baseSize * 0.9,
+                transformOrigin: 'bottom center',
+                transform: `translateX(-50%) rotate(${seconds * 6}deg)`
+              }}></div>
+            <div className="absolute top-1/2 left-1/2 w-2 h-2 rounded-full bg-white -translate-x-1/2 -translate-y-1/2" style={{ backgroundColor: clock.color || 'white' }}></div>
+          </div>
+        </div>
+      );
+    }
+
+    const clockStyle = {
+      color: clock.color || 'white',
+      fontSize: `${clock.size || 60}px`,
+      fontFamily: clock.style === 'classic' ? 'serif' : clock.style === 'neon' ? 'system-ui' : 'monospace',
+      textShadow: clock.style === 'neon' ? `0 0 10px ${clock.color || 'white'}, 0 0 20px ${clock.color || 'white'}` : '0 2px 10px rgba(0,0,0,0.8)',
+      background: clock.style === 'modern' ? 'rgba(0,0,0,0.3)' : 'transparent',
+      backdropFilter: clock.style === 'modern' ? 'blur(5px)' : 'none',
+      padding: clock.style === 'modern' ? '0.5rem 1rem' : '0',
+      borderRadius: '0.5rem'
+    };
+
+    return (
+      <div className={`absolute ${posClasses[clock.position] || 'top-4 right-4'} z-50`} style={clockStyle}>
+        {timeStr}
+      </div>
+    );
+  };
+
+  const RenderTicker = () => {
+    if (!ticker.enabled || !ticker.message) return null;
+
+    const hexToRgba = (hex: string, opacity: number) => {
+      let r = 0, g = 0, b = 0;
+      const h = hex.replace('#', '');
+      if (h.length === 6) {
+        r = parseInt(h.slice(0, 2), 16);
+        g = parseInt(h.slice(2, 4), 16);
+        b = parseInt(h.slice(4, 6), 16);
+      }
+      return `rgba(${r}, ${g}, ${b}, ${opacity})`;
+    };
+
+    const bgColor = hexToRgba(ticker.bgColor || '#000000', ticker.bgOpacity ?? 0.7);
+
+    return (
+      <div
+        className={`fixed left-0 right-0 ${ticker.position === 'top' ? 'top-0' : 'bottom-0'} z-[70] overflow-hidden w-full py-4 border-y border-white/10`}
+        style={{ backgroundColor: bgColor, color: ticker.color || 'yellow', pointerEvents: 'none' }}
+      >
+        <div
+          className="animate-marquee whitespace-nowrap inline-block"
+          style={{
+            animationDuration: `${Math.max(60, 600 - (ticker.speed - 1) * 22.5)}s`,
+            fontSize: `${ticker.fontSize || 28}px`,
+            fontFamily: ticker.fontFamily || 'Inter',
+            fontWeight: 'bold',
+            textShadow: '2px 2px 4px rgba(0,0,0,0.8)',
+            paddingLeft: '100%'
+          }}
+        >
+          {ticker.message}
+        </div>
+      </div>
+    );
+  };
+
   return (
-    <div className="w-screen h-screen bg-black overflow-hidden relative">
-      {isCameraActive ? (
-        <video id="live-camera-feed" autoPlay playsInline className="absolute inset-0 w-full h-full object-cover z-0"></video>
-      ) : bgImage?.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i) ? (
-        <video key={bgImage} src={cleanUrl(bgImage)} autoPlay loop muted playsInline preload="auto" className="absolute inset-0 w-full h-full object-cover"></video>
-      ) : (
-        <img src={bgImage} className="absolute inset-0 w-full h-full object-cover" alt="bg" />
+    <div className="relative w-screen h-screen overflow-hidden bg-black flex items-center justify-center text-white select-none">
+
+      {/* Background Video or Image */}
+      {bgImage && cleanUrl(bgImage) && (
+        <div className="absolute inset-0 z-0 bg-black">
+          {bgImage.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i) ? (
+            <video
+              key={bgImage}
+              src={cleanUrl(bgImage)}
+              autoPlay
+              loop
+              muted
+              playsInline
+              style={{ width: '100vw', height: '100vh', objectFit: 'cover' }}
+              onError={(e) => console.error("Background Video Error:", e)}
+            />
+          ) : (
+            <img src={cleanUrl(bgImage)} className="w-full h-full object-cover" alt="BG" />
+          )}
+        </div>
       )}
 
-      {overlayColor && <div className={`absolute inset-0 z-50 ${overlayColor === 'black' ? 'bg-black' : 'bg-white'}`}></div>}
+      {/* Camera Feed */}
+      {isCameraActive && (
+        <video
+          id="camera-video"
+          autoPlay
+          playsInline
+          className="absolute inset-0 w-full h-full object-cover z-5"
+        />
+      )}
+
+      {/* Live Overlay (Black/White fade) */}
+      {overlayColor && <div className={`absolute inset-0 z-[100] ${overlayColor === 'black' ? 'bg-black' : 'bg-white'}`} />}
+
+      {/* Clock & Ticker */}
+      <RenderClock />
+      <RenderTicker />
 
       <div className={`absolute inset-0 w-full h-full transition-opacity duration-300 ${isContentHidden ? 'opacity-0' : 'opacity-100'}`}>
-          {mediaOverlay && (
-             <div className="absolute inset-0 z-30 bg-black flex items-center justify-center">
-                {mediaOverlay.type === 'image' && <img src={mediaOverlay.url} className="w-full h-full object-contain" alt="Media" />}
-                {mediaOverlay.type === 'video' && <video key={mediaOverlay.url} src={cleanUrl(mediaOverlay.url)} className="w-full h-full object-contain" autoPlay playsInline preload="auto" />}
-                {mediaOverlay.type === 'document' && (
-                  <div className="w-full h-full bg-white text-black overflow-hidden flex items-center justify-center">
-                    {textContent ? <div className="p-10 whitespace-pre-wrap font-mono text-lg text-left w-full h-full overflow-y-auto">{textContent}</div> : <iframe src={cleanUrl(mediaOverlay.url)} className="w-full h-full border-none" title="Doc" />}
-                  </div>
-                )}
-             </div>
-          )}
+        {mediaOverlay && mediaOverlay.url && (
+          <div className="absolute inset-0 z-30 bg-black flex items-center justify-center">
+            {mediaOverlay.type === 'image' && <img src={cleanUrl(mediaOverlay.url)} className="w-full h-full object-contain" alt="Media" />}
+            {mediaOverlay.type === 'video' && <video key={mediaOverlay.url} src={cleanUrl(mediaOverlay.url)} className="w-full h-full object-contain" autoPlay loop muted playsInline preload="auto" />}
+            {mediaOverlay.type === 'document' && (
+              <div className="w-full h-full bg-white text-black overflow-hidden flex items-center justify-center">
+                {textContent ? <div className="p-10 whitespace-pre-wrap font-mono text-lg text-left w-full h-full overflow-y-auto">{textContent}</div> : <iframe src={cleanUrl(mediaOverlay.url)} className="w-full h-full border-none" title="Doc" />}
+              </div>
+            )}
+          </div>
+        )}
 
-          {reference && (
-             <div className={`absolute z-20 text-white font-bold drop-shadow-lg ${isBible ? 'top-8 right-12 text-4xl' : 'bottom-4 left-0 right-0 text-center text-xl text-white/60'}`}>
-                {reference}
-             </div>
-          )}
+        {reference && (
+          <div className={`absolute z-20 text-white font-bold drop-shadow-lg ${isBible ? 'top-8 right-12 text-4xl' : 'bottom-4 left-0 right-0 text-center text-xl text-white/60'}`}>
+            {reference}
+          </div>
+        )}
 
-          <div 
-            className="absolute inset-0 flex flex-col p-12 z-10 w-full h-full"
-            style={{ 
-              fontFamily: textSettings?.fontFamily,
-              justifyContent: textSettings?.valign === 'middle' ? 'center' : textSettings?.valign === 'bottom' ? 'flex-end' : 'flex-start',
+        <div
+          className="absolute inset-0 flex flex-col p-12 z-10 w-full h-full"
+          style={{
+            fontFamily: textSettings?.fontFamily,
+            justifyContent: textSettings?.valign === 'middle' ? 'center' : textSettings?.valign === 'bottom' ? 'flex-end' : 'flex-start',
+            alignItems: textSettings?.align === 'center' ? 'center' : textSettings?.align === 'left' ? 'flex-start' : 'flex-end',
+          }}
+        >
+          <div
+            className="flex flex-col"
+            style={{
+              width: `${textSettings?.contentWidth || 100}%`,
+              textAlign: textSettings?.align as any,
               alignItems: textSettings?.align === 'center' ? 'center' : textSettings?.align === 'left' ? 'flex-start' : 'flex-end',
             }}
           >
-            <div 
-              className="flex flex-col"
-              style={{
-                width: `${textSettings?.contentWidth || 100}%`,
-                textAlign: textSettings?.align as any,
-                alignItems: textSettings?.align === 'center' ? 'center' : textSettings?.align === 'left' ? 'flex-start' : 'flex-end',
-              }}
-            >
-              {lines.map((line, i) => (
-                <p 
-                   key={i} 
-                   className={`text-white font-bold w-full drop-shadow-[0_8px_8px_rgba(0,0,0,1)] ${textSettings?.isItalic ? 'italic' : ''} ${textSettings?.isUnderline ? 'underline' : ''}`} 
-                   style={{ 
-                     fontWeight: textSettings?.isBold ? 'bold' : 'normal',
-                     fontSize: `${(textSettings?.fontSize || 100) / 100 * 7}vh`,
-                     lineHeight: textSettings?.lineHeight || 1.4
-                   }}
-                   dangerouslySetInnerHTML={{ __html: line.replace(/<\/?[^>]+(>|$)/g, "") }}
-                />
-              ))}
-            </div>
+            {lines.map((line, i) => (
+              <p
+                key={i}
+                className={`text-white font-bold w-full drop-shadow-[0_8px_8px_rgba(0,0,0,1)] ${textSettings?.isItalic ? 'italic' : ''} ${textSettings?.isUnderline ? 'underline' : ''}`}
+                style={{
+                  fontWeight: textSettings?.isBold ? 'bold' : 'normal',
+                  fontSize: `${(textSettings?.fontSize || 100) / 100 * 7}vh`,
+                  lineHeight: textSettings?.lineHeight || 1.4
+                }}
+                dangerouslySetInnerHTML={{ __html: line.replace(/<\/?[^>]+(>|$)/g, "") }}
+              />
+            ))}
           </div>
+        </div>
       </div>
+      <style>{`
+        @keyframes marquee {
+          0% { transform: translateX(0); }
+          100% { transform: translateX(-1000%); }
+        }
+        .animate-marquee {
+          animation: marquee linear infinite;
+          will-change: transform;
+        }
+      `}</style>
     </div>
   );
 }

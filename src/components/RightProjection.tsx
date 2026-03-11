@@ -3,9 +3,8 @@ import { Star, AlertCircle, Presentation, MonitorOff } from 'lucide-react';
 
 export function RightProjection({ 
   activeSong, projectedSong, projectedVerseIdx, bgImage, textSettings, 
-  previewSettings, previewBg, isLiveActive, isBibleView, 
-  activeVerseIdx, setActiveVerseIdx, onProject, isBaseScreenProjected, 
-  setIsBaseScreenProjected, activeCategory 
+  isLiveActive, activeVerseIdx, setActiveVerseIdx, onProject, isBaseScreenProjected, 
+  setIsBaseScreenProjected
 }: any) {
   const [projectedLines, setProjectedLines] = useState<string[]>([]);
   const verses = activeSong?.lyrics?.split(/\n\s*\n/) || [];
