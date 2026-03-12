@@ -9,6 +9,7 @@ import {
 
 
 
+
 export function Toolbar({
   setBgImage, textSettings, setTextSettings, isLiveActive, handleLiveToggle,
   editingScope, setEditingScope, activeSong, activeVerseIdx, activeCategory,
@@ -16,7 +17,8 @@ export function Toolbar({
   setIsBaseScreenProjected, cameraList, selectedCamera, setSelectedCamera,
   isCameraActive, setIsCameraActive,
   clockSettings, setClockSettings,
-  tickerSettings, setTickerSettings
+  tickerSettings, setTickerSettings,
+  refreshCameras
 }: any) {
   const [activeMediaMenu, setActiveMediaMenu] = useState<'image' | 'video' | 'clock' | 'ticker' | null>(null);
   const [showFontDropdown, setShowFontDropdown] = useState(false);
@@ -25,6 +27,23 @@ export function Toolbar({
   const fontSizes = [50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 180, 200, 250, 300];
 
   const isVideoUrl = (url: string) => url.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i);
+
+  const cleanUrl = (url: string) => {
+    if (!url || url === '' || url === 'null') return undefined;
+    if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('asset:') || url.startsWith('http') || url.startsWith('tauri:')) {
+      return url;
+    }
+    
+    const appDataPath = localStorage.getItem('appDataPath');
+    let relativePath = url;
+    
+    if (appDataPath && url.startsWith(appDataPath)) {
+      relativePath = url.replace(appDataPath, '');
+    }
+    
+    const stripped = relativePath.startsWith('/') ? relativePath.slice(1) : relativePath;
+    return `http://127.0.0.1:11223/fs/${encodeURIComponent(stripped).replace(/%2F/g, '/')}`;
+  };
 
   const defaultBgs: { name: string, url: string }[] = [
     // { name: 'Easy Worship', url: '/backgrounds/easy_worship.mp4' }
@@ -219,7 +238,7 @@ export function Toolbar({
                   {defaultBgs.filter(bg => !isVideoUrl(bg.url)).map(bg => <div key={bg.url} onClick={() => handleBgSelect(bg.url)} className="aspect-video bg-black overflow-hidden rounded border border-transparent hover:border-[#5865f2] transition cursor-pointer"><img src={bg.url} className="w-full h-full object-cover" /></div>)}
                   {customBgs.filter(path => !isVideoUrl(path)).map((path, i) => (
                     <div key={i} onClick={() => handleBgSelect(path)} className="aspect-video bg-black overflow-hidden rounded border border-transparent hover:border-[#5865f2] transition cursor-pointer relative group">
-                      <img src={path} className="w-full h-full object-cover" />
+                      <img src={cleanUrl(path)} className="w-full h-full object-cover" />
                       <button onClick={(e) => handleDeleteCustomMedia(e, path)} className="absolute top-1 right-1 p-1 bg-red-600/80 text-white rounded opacity-0 group-hover:opacity-100 transition hover:bg-red-600">
                         <Trash2 size={10} />
                       </button>
@@ -245,7 +264,7 @@ export function Toolbar({
                   ))}
                   {customBgs.filter(path => isVideoUrl(path)).map((path, i) => (
                     <div key={i} onClick={() => handleBgSelect(path)} className="aspect-video bg-black overflow-hidden rounded border border-transparent hover:border-[#5865f2] transition cursor-pointer relative group">
-                      <video src={path} className="w-full h-full object-cover" muted />
+                      <video src={cleanUrl(path)} className="w-full h-full object-cover" muted />
                       <div className="absolute inset-0 flex items-center justify-center text-white/40"><Play size={20} /></div>
                       <button onClick={(e) => handleDeleteCustomMedia(e, path)} className="absolute top-1 right-1 p-1 bg-red-600/80 text-white rounded opacity-0 group-hover:opacity-100 transition hover:bg-red-600">
                         <Trash2 size={10} />
@@ -256,30 +275,50 @@ export function Toolbar({
               </div>
             )}
           </div>
-          <div className="flex items-center gap-1 bg-[#2b2d31] rounded border border-[#36393f] p-0.5 ml-1">
+          <div className="flex items-center gap-1 bg-[#2b2d31] rounded-lg border border-[#36393f] p-1 ml-1 hover:border-[#5865f2] transition-all group/cam shadow-inner">
             <button
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded transition text-xs font-semibold ${isCameraActive ? 'bg-orange-500 text-white' : 'hover:bg-[#3f4147] text-gray-300'}`}
+              className={`flex items-center gap-2 px-4 py-1.5 rounded-md transition-all text-xs font-bold ${isCameraActive ? 'bg-orange-500 text-white shadow-[0_0_15px_rgba(249,115,22,0.4)]' : 'hover:bg-[#3f4147] text-gray-400 group-hover/cam:text-gray-200'}`}
               onClick={async () => {
                 const next = !isCameraActive;
+                
+                // If opening, try to get permissions to "unlock" labels and virtual cams
+                if (next) {
+                  try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                    stream.getTracks().forEach(t => t.stop());
+                    if (refreshCameras) await refreshCameras();
+                  } catch (e) {
+                    console.warn("Permission denied or failed:", e);
+                  }
+                }
+
                 setIsCameraActive(next);
                 const { emit } = await import('@tauri-apps/api/event');
                 emit('toggle_live_camera', next);
               }}
             >
-              <Camera size={14} /> Caméra
+              <Camera size={14} className={isCameraActive ? 'animate-pulse' : ''} /> 
+              <span>Caméra</span>
             </button>
             {isCameraActive && cameraList.length > 0 && (
-              <select
-                className="bg-[#1e1f22] text-[10px] text-white border-none outline-none py-1 px-1 rounded cursor-pointer max-w-[80px]"
-                value={selectedCamera}
-                onChange={async (e) => {
-                  setSelectedCamera(e.target.value);
-                  const { emit } = await import('@tauri-apps/api/event');
-                  emit('set_camera_id', e.target.value);
-                }}
-              >
-                {cameraList.map((c: any) => <option key={c.deviceId} value={c.deviceId}>{c.label || 'Caméra'}</option>)}
-              </select>
+              <div className="relative flex items-center h-full">
+                <div className="w-px h-6 bg-[#36393f] mx-1"></div>
+                <select
+                  className="bg-[#1e1f22] text-[10px] text-[#5865f2] font-black border border-[#36393f] outline-none py-1 px-2 rounded-md cursor-pointer max-w-[120px] hover:border-[#5865f2] transition-all appearance-none pr-6 shadow-sm"
+                  style={{ backgroundImage: `url('data:image/svg+xml;utf8,<svg fill="currentColor" height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg"><path d="M7 10l5 5 5-5z" fill="%235865f2"/></svg>')`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 2px center', backgroundSize: '16px' }}
+                  value={selectedCamera}
+                  onChange={async (e) => {
+                    setSelectedCamera(e.target.value);
+                    const { emit } = await import('@tauri-apps/api/event');
+                    emit('set_camera_id', e.target.value);
+                  }}
+                >
+                  {cameraList.map((c: any) => <option key={c.deviceId} value={c.deviceId} className="bg-[#2b2d31] text-white">{c.label || `Source ${c.deviceId.slice(0,4)}`}</option>)}
+                </select>
+              </div>
+            )}
+            {isCameraActive && cameraList.length === 0 && (
+               <span className="text-[10px] text-red-400 font-bold px-2 animate-pulse">Aucune source déctectée</span>
             )}
           </div>
 

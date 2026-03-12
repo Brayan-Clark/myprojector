@@ -10,22 +10,22 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "title": "MyProjector",
-        "width": 1280,
-        "height": 720
-      }
-    ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; img-src 'self' asset: asset://* http://asset.localhost https://raw.githubusercontent.com blob: data: http://127.0.0.1:11223; video-src 'self' asset: asset://* http://asset.localhost blob: data: http://127.0.0.1:11223; audio-src 'self' asset: asset://* http://asset.localhost blob: data: http://127.0.0.1:11223; connect-src 'self' ipc: http://ipc.localhost https://raw.githubusercontent.com https://*.githubusercontent.com http://127.0.0.1:11223; media-src 'self' asset: asset://* http://asset.localhost blob: data: http://127.0.0.1:11223; object-src 'self' blob:; frame-src 'self' blob:;",
       "assetProtocol": {
         "enable": true,
         "scope": [
           "**"
         ]
       }
-    }
+    },
+    "windows": [
+      {
+        "title": "MyProjector",
+        "width": 1280,
+        "height": 720
+      }
+    ]
   },
   "bundle": {
     "active": true,
@@ -36,6 +36,10 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "resources": [
+      "data/**/*",
+      "../public/backgrounds/**/*"
     ]
   }
 }

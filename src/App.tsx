@@ -8,7 +8,10 @@ import { LiveView } from './components/LiveView';
 
 function App() {
   const [songs, setSongs] = useState<any[]>([]);
-  const [playlist, setPlaylist] = useState<any[]>([]);
+  const [playlist, setPlaylist] = useState<any[]>(() => {
+    const saved = localStorage.getItem('currentPlaylist');
+    return saved ? JSON.parse(saved) : [];
+  });
   const [activeSong, setActiveSong] = useState<any>(null);
   const [activeVerseIdx, setActiveVerseIdx] = useState<number>(-1);
   const [projectedSong, setProjectedSong] = useState<any>(null);
@@ -28,17 +31,39 @@ function App() {
   const [selectedCamera, setSelectedCamera] = useState<string>("");
   const [isCameraActive, setIsCameraActive] = useState(false);
 
-  useEffect(() => {
-    navigator.mediaDevices.enumerateDevices().then(devices => {
+  const refreshCameras = async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
       const cams = devices.filter(d => d.kind === 'videoinput');
       setCameraList(cams);
-      if (cams.length > 0) setSelectedCamera(cams[0].deviceId);
-    });
+      if (cams.length > 0 && !selectedCamera) {
+        setSelectedCamera(cams[0].deviceId);
+      }
+    } catch (e) {
+      console.warn("Failed to enumerate initially:", e);
+    }
+  };
+
+  useEffect(() => {
+    refreshCameras();
+    navigator.mediaDevices.addEventListener('devicechange', refreshCameras);
+    return () => navigator.mediaDevices.removeEventListener('devicechange', refreshCameras);
+  }, [selectedCamera]);
+
+  // Store app data path in localStorage so LiveView and other windows can use it
+  useEffect(() => {
+    invoke<string>('get_app_data_path').then(path => {
+      localStorage.setItem('appDataPath', path);
+    }).catch(console.error);
   }, []);
 
   useEffect(() => {
     localStorage.setItem('favoriteDbs', JSON.stringify(favoriteDbs));
   }, [favoriteDbs]);
+
+  useEffect(() => {
+    localStorage.setItem('currentPlaylist', JSON.stringify(playlist));
+  }, [playlist]);
 
   const isLiveMode = useMemo(() => new URLSearchParams(window.location.search).get('live') === 'true', []);
 
@@ -51,16 +76,7 @@ function App() {
     const handleGlobalShortcuts = (e: KeyboardEvent) => {
       if (e.altKey && e.key.toLowerCase() === 'b') {
         e.preventDefault();
-        setIsBaseScreenProjected(prev => {
-          const next = !prev;
-          if (next) {
-            import('@tauri-apps/api/event').then(({ emit }) => {
-              emit('update_live_lyrics', { lines: [], reference: "" });
-              emit('update_live_media', null);
-            });
-          }
-          return next;
-        });
+        setIsBaseScreenProjected(prev => !prev);
       }
       if (e.altKey && e.key.toLowerCase() === 'p') {
         e.preventDefault();
@@ -82,9 +98,6 @@ function App() {
       if (e.altKey && e.key.toLowerCase() === 'h') {
         e.preventDefault();
         setIsContentHidden(prev => !prev);
-        import('@tauri-apps/api/event').then(({ emit }) => {
-          emit('update_live_hide_content', !isContentHidden);
-        });
       }
     };
     window.addEventListener('keydown', handleGlobalShortcuts);
@@ -158,10 +171,10 @@ function App() {
   };
 
   const defaultStyles: any = {
-    chant: { textSettings: { ...defaultTextSettings }, bgImage: "http://localhost:1420/backgrounds/sunset.jpg" },
-    hymnes: { textSettings: { ...defaultTextSettings }, bgImage: "http://localhost:1420/backgrounds/sunset.jpg" },
-    bible: { textSettings: { ...defaultTextSettings, align: 'left' }, bgImage: "http://localhost:1420/backgrounds/tree.png" },
-    agenda: { textSettings: { ...defaultTextSettings }, bgImage: "http://localhost:1420/backgrounds/sunset.jpg" },
+    chant: { textSettings: { ...defaultTextSettings }, bgImage: "/backgrounds/sunset.jpg" },
+    hymnes: { textSettings: { ...defaultTextSettings }, bgImage: "/backgrounds/sunset.jpg" },
+    bible: { textSettings: { ...defaultTextSettings, align: 'left' }, bgImage: "/backgrounds/tree.png" },
+    agenda: { textSettings: { ...defaultTextSettings }, bgImage: "/backgrounds/sunset.jpg" },
   };
 
   const [settingsByCategory, setSettingsByCategory] = useState(() => {
@@ -306,7 +319,11 @@ function App() {
   };
 
   useEffect(() => {
-    sync();
+    // Lower debounce (50ms) for instantaneous feel while still preventing race conditions
+    const timer = setTimeout(() => {
+      sync();
+    }, 50);
+    return () => clearTimeout(timer);
   }, [isLiveActive, computedLiveSettings, projectedSong, projectedVerseIdx, isBaseScreenProjected, isContentHidden, liveCategory, clockSettings, tickerSettings]);
 
   useEffect(() => {
@@ -482,6 +499,7 @@ function App() {
         setClockSettings={setClockSettings}
         tickerSettings={tickerSettings}
         setTickerSettings={setTickerSettings}
+        refreshCameras={refreshCameras}
       />
 
       <div className="flex-1 flex min-h-0">
@@ -499,7 +517,6 @@ function App() {
             }
             setActiveVerseIdx(startIdx);
             if (category) setActiveCategory(category);
-            setIsBaseScreenProjected(false);
           }}
           isLoading={isLoading}
           onLoadDb={loadDbData}
@@ -540,6 +557,13 @@ function App() {
           isBaseScreenProjected={isBaseScreenProjected}
           setIsBaseScreenProjected={setIsBaseScreenProjected}
           activeCategory={activeCategory}
+          ticker={tickerSettings}
+          clock={clockSettings}
+          mediaOverlay={null} 
+          isContentHidden={isContentHidden}
+          isCameraActive={isCameraActive}
+          selectedCamera={selectedCamera}
+          currentTime={new Date()}
         />
       </div>
     </div>

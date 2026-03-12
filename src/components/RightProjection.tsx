@@ -1,28 +1,30 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Star, AlertCircle, Presentation, MonitorOff, Headphones, Youtube, Globe } from 'lucide-react';
-import { convertFileSrc } from '@tauri-apps/api/core';
 
 export function RightProjection({ 
   activeSong, projectedSong, projectedVerseIdx, bgImage, textSettings, 
   isLiveActive, activeVerseIdx, setActiveVerseIdx, onProject, isBaseScreenProjected, 
-  setIsBaseScreenProjected
+  setIsBaseScreenProjected, ticker, clock, isContentHidden, isCameraActive, selectedCamera, currentTime, mediaOverlay 
 }: any) {
   const [projectedLines, setProjectedLines] = useState<string[]>([]);
+  const previewVideoRef = useRef<HTMLVideoElement>(null);
   const verses = activeSong?.lyrics?.split(/\n\s*\n/) || [];
   
   const cleanUrl = (url: string) => {
-    if (!url || url === '' || url === 'null') return '';
-    // Already a converted asset or web URL - pass through
-    if (url.startsWith('asset:') || url.startsWith('http') || url.startsWith('tauri:')) {
+    if (!url || url === '' || url === 'null') return undefined;
+    if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('asset:') || url.startsWith('http') || url.startsWith('tauri:')) {
       return url;
     }
-    // Public backgrounds served by Vite dev server
-    if (url.startsWith('/backgrounds/')) return url;
-    // Absolute filesystem path (Linux: starts with /, Windows: has drive letter like C:\)
-    if (url.startsWith('/') || url.match(/^[A-Za-z]:\\/)) {
-      return convertFileSrc(url);
+    
+    const appDataPath = localStorage.getItem('appDataPath');
+    let relativePath = url;
+    
+    if (appDataPath && url.startsWith(appDataPath)) {
+      relativePath = url.replace(appDataPath, '');
     }
-    return url;
+    
+    const stripped = relativePath.startsWith('/') ? relativePath.slice(1) : relativePath;
+    return `http://127.0.0.1:11223/fs/${encodeURIComponent(stripped).replace(/%2F/g, '/')}`;
   };
 
   useEffect(() => {
@@ -84,6 +86,42 @@ export function RightProjection({
   }, [activeVerseIdx, verses, activeSong, projectedSong, isBaseScreenProjected]);
 
   useEffect(() => {
+    let stream: MediaStream | null = null;
+    const startCam = async () => {
+      if (isCameraActive && previewVideoRef.current) {
+        try {
+          const constraints = {
+            video: selectedCamera 
+              ? { deviceId: { exact: selectedCamera }, width: { ideal: 1280 }, height: { ideal: 720 } } 
+              : { width: { ideal: 1280 }, height: { ideal: 720 } }
+          };
+          stream = await navigator.mediaDevices.getUserMedia(constraints);
+          if (previewVideoRef.current) {
+            previewVideoRef.current.srcObject = stream;
+            previewVideoRef.current.play().catch(() => {});
+          }
+        } catch (e) {
+          console.error("Preview Camera Error:", e);
+          // Fallback
+          try {
+             stream = await navigator.mediaDevices.getUserMedia({ video: true });
+             if (previewVideoRef.current) {
+               previewVideoRef.current.srcObject = stream;
+               previewVideoRef.current.play().catch(() => {});
+             }
+          } catch(e2) {}
+        }
+      }
+    };
+    startCam();
+    return () => {
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+      }
+    };
+  }, [isCameraActive, selectedCamera]);
+
+  useEffect(() => {
     const handleProjectKey = (e: KeyboardEvent) => {
       if (e.altKey && e.key === 'Enter') {
         e.preventDefault();
@@ -139,72 +177,107 @@ export function RightProjection({
         </div>
       </div>
 
-      <div className="aspect-video bg-[#18191c] border-t-2 border-[#5865f2] relative overflow-hidden group/monitor">
+      <div className={`aspect-video bg-[#18191c] border-t-2 border-[#5865f2] relative overflow-hidden group/monitor ${isContentHidden ? 'opacity-50' : ''}`}>
          {/* Live Monitor View */}
          <div className="absolute top-1 left-2 z-30 text-[8px] font-black text-white/40 tracking-widest uppercase pointer-events-none">Ecran de Presentation</div>
+         {isContentHidden && <div className="absolute inset-0 z-50 bg-black/80 flex items-center justify-center text-[8px] font-bold text-red-500 uppercase tracking-widest">Contenu Masqué</div>}
          
-         {!isBaseScreenProjected && projectedSong ? (
-            <>
-               {bgImage?.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i) ? (
-                  <video key={bgImage} src={cleanUrl(bgImage)} autoPlay loop muted playsInline className="absolute inset-0 w-full h-full object-cover" />
+         {/* Background — always visible */}
+         <div className="absolute inset-0 z-0">
+            {bgImage?.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i) ? (
+               <video key={bgImage} src={cleanUrl(bgImage)} autoPlay loop muted playsInline className="w-full h-full object-cover" />
+            ) : bgImage ? (
+               <img src={cleanUrl(bgImage)} className="w-full h-full object-cover" alt="Background" />
+            ) : (
+               <div className="w-full h-full bg-black" />
+            )}
+         </div>
+ 
+        {/* Camera Feed */}
+        {isCameraActive && (
+           <video ref={previewVideoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-cover z-10 bg-black" />
+        )}
+
+        {/* Clock & Ticker Previews */}
+        <div className="absolute inset-0 z-40 pointer-events-none transform scale-[0.3] origin-top-right">
+           {clock?.enabled && (
+              <div className="absolute top-4 right-4 bg-black/60 text-white p-2 rounded text-2xl font-mono border-4 border-white/40">
+                 {currentTime.toLocaleTimeString()}
+              </div>
+           )}
+        </div>
+
+        {ticker?.enabled && (
+          <div className="absolute bottom-0 left-0 right-0 z-30 bg-black/40 h-4 flex items-center overflow-hidden border-t border-white/10">
+             <div className="whitespace-nowrap text-[6px] text-white animate-pulse px-2">{ticker.text}</div>
+          </div>
+        )}
+
+         {/* Content overlay — only when projecting */}
+         {!isBaseScreenProjected && projectedSong && (
+            <div className="absolute inset-0 flex items-center justify-center flex-col p-4 z-20">
+               {['image', 'video', 'document', 'audio', 'youtube', 'link'].includes(projectedSong.type) ? (
+                  <div className="w-full h-full flex items-center justify-center z-20 absolute inset-0 bg-black">
+                     {projectedSong.type === 'image' && <img src={cleanUrl(projectedSong.lyrics)} className="w-full h-full object-contain" alt="Media" />}
+                     {projectedSong.type === 'video' && <video key={projectedSong.lyrics} src={cleanUrl(projectedSong.lyrics)} className="w-full h-full object-contain" autoPlay muted playsInline preload="auto" />}
+                     {projectedSong.type === 'audio' && (
+                       <div className="flex flex-col items-center gap-1">
+                          <Headphones size={16} className="text-green-400 animate-pulse" />
+                          <span className="text-[6px] text-gray-500">Projecté en Audio...</span>
+                       </div>
+                     )}
+                     {projectedSong.type === 'youtube' && (
+                        <div className="w-full h-full bg-black flex flex-col items-center justify-center gap-1">
+                           <Youtube size={16} className="text-red-500" />
+                           <span className="text-[6px] text-white">Prêt pour YouTube</span>
+                        </div>
+                     )}
+                     {projectedSong.type === 'link' && (
+                        <div className="w-full h-full bg-white flex flex-col items-center justify-center gap-1">
+                           <Globe size={16} className="text-blue-500" />
+                           <span className="text-[6px] text-gray-800">Lien Web</span>
+                        </div>
+                     )}
+                  </div>
                ) : (
-                  <img src={bgImage} className="absolute inset-0 w-full h-full object-cover" alt="Background" />
+                  <div 
+                     className="flex flex-col w-full h-full" 
+                     style={{ 
+                        fontFamily: textSettings?.fontFamily, 
+                        justifyContent: textSettings?.valign === 'middle' ? 'center' : textSettings?.valign === 'bottom' ? 'flex-end' : 'flex-start',
+                        alignItems: textSettings?.align === 'center' ? 'center' : textSettings?.align === 'left' ? 'flex-start' : 'flex-end'
+                     }}
+                  >
+                     {projectedLines.map((line: string, i: number) => (
+                        <p 
+                           key={i} 
+                           className="text-white font-bold text-[8px] w-full drop-shadow-md" 
+                           style={{ 
+                              textAlign: textSettings?.align as any,
+                              fontWeight: textSettings?.isBold ? 'bold' : 'normal',
+                              fontStyle: textSettings?.isItalic ? 'italic' : 'normal',
+                              textDecoration: textSettings?.isUnderline ? 'underline' : 'none'
+                           }} 
+                           dangerouslySetInnerHTML={{ __html: line.replace(/<\/?[^>]+(>|$)/g, "") }} 
+                        />
+                     ))}
+                  </div>
                )}
-               
-               <div className="absolute inset-0 flex items-center justify-center flex-col p-4 z-10">
-                  {['image', 'video', 'document', 'audio', 'youtube', 'link'].includes(projectedSong.type) ? (
-                     <div className="w-full h-full flex items-center justify-center z-20 absolute inset-0 bg-black">
-                        {projectedSong.type === 'image' && <img src={projectedSong.lyrics} className="w-full h-full object-contain" alt="Media" />}
-                        {projectedSong.type === 'video' && <video key={projectedSong.lyrics} src={cleanUrl(projectedSong.lyrics)} className="w-full h-full object-contain" autoPlay muted playsInline preload="auto" />}
-                        {projectedSong.type === 'audio' && (
-                          <div className="flex flex-col items-center gap-1">
-                             <Headphones size={16} className="text-green-400 animate-pulse" />
-                             <span className="text-[6px] text-gray-500">Lecture Audio...</span>
-                          </div>
-                        )}
-                        {projectedSong.type === 'youtube' && (
-                           <div className="w-full h-full bg-black flex flex-col items-center justify-center gap-1">
-                              <Youtube size={16} className="text-red-500" />
-                              <span className="text-[6px] text-white">Prêt pour YouTube</span>
-                           </div>
-                        )}
-                        {projectedSong.type === 'link' && (
-                           <div className="w-full h-full bg-white flex flex-col items-center justify-center gap-1">
-                              <Globe size={16} className="text-blue-500" />
-                              <span className="text-[6px] text-gray-800">Lien Web</span>
-                           </div>
-                        )}
-                     </div>
-                  ) : (
-                     <div 
-                        className="flex flex-col w-full h-full" 
-                        style={{ 
-                           fontFamily: textSettings?.fontFamily, 
-                           justifyContent: textSettings?.valign === 'middle' ? 'center' : textSettings?.valign === 'bottom' ? 'flex-end' : 'flex-start',
-                           alignItems: textSettings?.align === 'center' ? 'center' : textSettings?.align === 'left' ? 'flex-start' : 'flex-end'
-                        }}
-                     >
-                        {projectedLines.map((line: string, i: number) => (
-                           <p 
-                              key={i} 
-                              className="text-white font-bold text-[8px] w-full drop-shadow-md" 
-                              style={{ 
-                                 textAlign: textSettings?.align as any,
-                                 fontWeight: textSettings?.isBold ? 'bold' : 'normal',
-                                 fontStyle: textSettings?.isItalic ? 'italic' : 'normal',
-                                 textDecoration: textSettings?.isUnderline ? 'underline' : 'none'
-                              }} 
-                              dangerouslySetInnerHTML={{ __html: line.replace(/<\/?[^>]+(>|$)/g, "") }} 
-                           />
-                        ))}
-                     </div>
-                  )}
-               </div>
-            </>
-         ) : (
-            <div className="absolute inset-0 bg-black flex flex-col items-center justify-center gap-2">
-               <MonitorOff size={24} className="text-gray-700" />
-               <span className="text-[10px] text-gray-700 font-bold uppercase tracking-tighter">Écran d'Accueil</span>
+            </div>
+         )}
+
+         {/* Media Overlay Mirror (Images/Vidéos globales) */}
+         {!isBaseScreenProjected && mediaOverlay && mediaOverlay.url && (
+            <div className="absolute inset-0 z-30 bg-black flex items-center justify-center">
+               {mediaOverlay.type === 'image' && <img src={cleanUrl(mediaOverlay.url)} className="w-full h-full object-contain" alt="Overlay" />}
+               {mediaOverlay.type === 'video' && <video key={mediaOverlay.url} src={cleanUrl(mediaOverlay.url)} className="w-full h-full object-contain" autoPlay muted loop />}
+            </div>
+         )}
+
+         {/* Base screen label when not projecting */}
+         {isBaseScreenProjected && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 z-10 pointer-events-none">
+               <span className="text-[8px] text-white/30 font-bold uppercase tracking-widest bg-black/40 px-2 py-1 rounded">Écran de Base</span>
             </div>
          )}
          

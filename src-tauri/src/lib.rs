@@ -1,6 +1,71 @@
 use rusqlite::{Connection, Result};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
+use std::path::PathBuf;
+use std::fs;
+use std::io::Write;
+use warp::Filter;
+
+fn get_data_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let path = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    
+    // Subdirs for our app
+    let subdirs = ["data/hymnes", "data/bible", "backgrounds", "media"];
+    for sub in subdirs {
+        let mut full_path = path.clone();
+        full_path.push(sub);
+        if !full_path.exists() {
+            fs::create_dir_all(&full_path).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(path)
+}
+
+fn init_data(app: &tauri::AppHandle) -> Result<(), String> {
+    let data_root = get_data_root(app)?;
+    println!("Initializing data in {:?}", data_root);
+    
+    if let Ok(res_dir) = app.path().resource_dir() {
+        println!("Resources found in {:?}", res_dir);
+        // Copy DBs
+        let data_src = res_dir.join("data");
+        if data_src.exists() {
+            println!("Copying data from {:?} to {:?}", data_src, data_root);
+            let _ = copy_dir_recursive(&data_src, &data_root.join("data"));
+        }
+        
+        // Copy initial backgrounds
+        let bg_src = res_dir.join("backgrounds");
+        if bg_src.exists() {
+             println!("Copying backgrounds from {:?} to {:?}", bg_src, data_root);
+             let _ = copy_dir_recursive(&bg_src, &data_root.join("backgrounds"));
+        }
+    } else {
+        println!("Resource directory not found!");
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
+    if !dst.exists() {
+        fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+    }
+    for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let ty = entry.file_type().map_err(|e| e.to_string())?;
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst.join(entry.file_name()))?;
+        } else {
+            let dest_file = dst.join(entry.file_name());
+            if !dest_file.exists() {
+                if let Err(e) = fs::copy(entry.path(), &dest_file) {
+                    println!("Failed to copy file {:?}: {}", entry.path(), e);
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct Song {
@@ -12,11 +77,8 @@ pub struct Song {
 }
 
 #[tauri::command]
-fn fetch_hymns(_app_handle: tauri::AppHandle, db_name: &str) -> Result<Vec<Song>, String> {
-    // Determine the db path correctly based on the app environment
-    // For development, assuming src-tauri/data/hymnes/
-    // We can use current_dir or a fixed base for now
-    let mut db_path = std::env::current_dir().map_err(|e| e.to_string())?;
+fn fetch_hymns(app_handle: tauri::AppHandle, db_name: &str) -> Result<Vec<Song>, String> {
+    let mut db_path = get_data_root(&app_handle)?;
     db_path.push("data");
     db_path.push("hymnes");
     db_path.push(db_name);
@@ -63,8 +125,8 @@ pub struct BibleVerse {
 }
 
 #[tauri::command]
-fn fetch_bible(db_name: &str) -> Result<Vec<Song>, String> {
-    let mut db_path = std::env::current_dir().map_err(|e| e.to_string())?;
+fn fetch_bible(app_handle: tauri::AppHandle, db_name: &str) -> Result<Vec<Song>, String> {
+    let mut db_path = get_data_root(&app_handle)?;
     db_path.push("data");
     db_path.push("bible");
     db_path.push(db_name);
@@ -139,13 +201,14 @@ fn fetch_bible(db_name: &str) -> Result<Vec<Song>, String> {
 
 #[tauri::command]
 fn update_song(
+    app_handle: tauri::AppHandle,
     db_name: &str,
     is_bible: bool,
     id: i64,
     title: String,
     content: String,
 ) -> Result<(), String> {
-    let mut db_path = std::env::current_dir().map_err(|e| e.to_string())?;
+    let mut db_path = get_data_root(&app_handle)?;
     db_path.push("data");
     db_path.push(if is_bible { "bible" } else { "hymnes" });
     db_path.push(db_name);
@@ -170,12 +233,11 @@ fn update_song(
     Ok(())
 }
 
-use std::fs;
-use std::io::Write;
+
 
 #[tauri::command]
-fn list_dbs(category: &str) -> Result<Vec<String>, String> {
-    let mut dir_path = std::env::current_dir().map_err(|e| e.to_string())?;
+fn list_dbs(app_handle: tauri::AppHandle, category: &str) -> Result<Vec<String>, String> {
+    let mut dir_path = get_data_root(&app_handle)?;
     dir_path.push("data");
     dir_path.push(category);
 
@@ -197,8 +259,8 @@ fn list_dbs(category: &str) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-async fn download_db(url: String, category: String, filename: String) -> Result<(), String> {
-    let mut dest_path = std::env::current_dir().map_err(|e| e.to_string())?;
+async fn download_db(app_handle: tauri::AppHandle, url: String, category: String, filename: String) -> Result<(), String> {
+    let mut dest_path = get_data_root(&app_handle)?;
     dest_path.push("data");
     dest_path.push(category);
     fs::create_dir_all(&dest_path).map_err(|e| e.to_string())?;
@@ -214,8 +276,8 @@ async fn download_db(url: String, category: String, filename: String) -> Result<
 }
 
 #[tauri::command]
-fn delete_db(category: &str, filename: &str) -> Result<(), String> {
-    let mut db_path = std::env::current_dir().map_err(|e| e.to_string())?;
+fn delete_db(app_handle: tauri::AppHandle, category: &str, filename: &str) -> Result<(), String> {
+    let mut db_path = get_data_root(&app_handle)?;
     db_path.push("data");
     db_path.push(category);
     db_path.push(filename);
@@ -227,13 +289,9 @@ fn delete_db(category: &str, filename: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn list_backgrounds() -> Result<Vec<String>, String> {
-    // Use ../public/backgrounds/ so files are served via HTTP (Vite dev server)
-    // This is required on Linux because WebKitGTK does NOT support Range requests
-    // for the asset:// protocol, which breaks video playback.
-    let mut dir_path = std::env::current_dir().map_err(|e| e.to_string())?;
-    dir_path.pop(); // go up from src-tauri to project root
-    dir_path.push("public");
+fn list_backgrounds(app_handle: tauri::AppHandle) -> Result<Vec<String>, String> {
+    // Return absolute paths so the frontend can use convertFileSrc
+    let mut dir_path = get_data_root(&app_handle)?;
     dir_path.push("backgrounds");
 
     if !dir_path.exists() {
@@ -245,11 +303,10 @@ fn list_backgrounds() -> Result<Vec<String>, String> {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
         if path.is_file() {
-            if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+            if let Some(_filename) = path.file_name().and_then(|n| n.to_str()) {
                 let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
                 if ["png", "jpg", "jpeg", "webp", "gif", "mp4", "webm", "ogg", "mov", "mkv", "avi", "m4v"].contains(&ext.as_str()) {
-                    // Return as HTTP-relative URL (served by Vite)
-                    files.push(format!("/backgrounds/{}", filename));
+                    files.push(path.to_string_lossy().to_string());
                 }
             }
         }
@@ -258,12 +315,8 @@ fn list_backgrounds() -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-fn import_background(source_path: String) -> Result<String, String> {
-    // Copy to ../public/backgrounds/ so files are served via HTTP rather than asset://
-    // WebKitGTK on Linux requires HTTP for video Range requests.
-    let mut dest_dir = std::env::current_dir().map_err(|e| e.to_string())?;
-    dest_dir.pop(); // go up from src-tauri to project root
-    dest_dir.push("public");
+fn import_background(app_handle: tauri::AppHandle, source_path: String) -> Result<String, String> {
+    let mut dest_dir = get_data_root(&app_handle)?;
     dest_dir.push("backgrounds");
 
     if !dest_dir.exists() {
@@ -277,41 +330,52 @@ fn import_background(source_path: String) -> Result<String, String> {
 
     fs::copy(src, &dest_path).map_err(|e| e.to_string())?;
 
-    // Return the HTTP-relative URL (served by Vite dev server or in production)
-    let filename_str = filename.to_str().unwrap_or("");
-    Ok(format!("/backgrounds/{}", filename_str))
+    // Return the absolute path
+    Ok(dest_path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-fn delete_background(file_path: String) -> Result<(), String> {
-    // file_path is now a relative URL like "/backgrounds/video.mp4"
-    // Resolve it to the actual filesystem path in public/backgrounds/
-    if !file_path.starts_with("/backgrounds/") {
-        return Err("Invalid path: must start with /backgrounds/".to_string());
+fn delete_background(app_handle: tauri::AppHandle, file_path: String) -> Result<(), String> {
+    // file_path is now an absolute path
+    let bg_path = PathBuf::from(&file_path);
+    
+    // Safety check: ensure it's inside our backgrounds folder
+    let mut root = get_data_root(&app_handle)?;
+    root.push("backgrounds");
+    
+    if !bg_path.starts_with(&root) {
+        return Err("Accès refusé: le fichier est en dehors du dossier backgrounds".to_string());
     }
-    let filename = &file_path["/backgrounds/".len()..];
 
-    let mut bg_dir = std::env::current_dir().map_err(|e| e.to_string())?;
-    bg_dir.pop(); // go up from src-tauri to project root
-    bg_dir.push("public");
-    bg_dir.push("backgrounds");
-    bg_dir.push(filename);
-
-    if bg_dir.exists() {
-        fs::remove_file(&bg_dir).map_err(|e| e.to_string())?;
+    if bg_path.exists() {
+        fs::remove_file(&bg_path).map_err(|e| e.to_string())?;
         Ok(())
     } else {
-        Err(format!("File not found: {:?}", bg_dir))
+        Err(format!("File not found: {:?}", bg_path))
     }
 }
 
 #[tauri::command]
-fn import_media(source_path: String) -> Result<String, String> {
-    // Copy any media file (video, audio, image, doc) to public/media/ for HTTP serving.
-    // Required on Linux because WebKitGTK cannot stream files via asset:// protocol.
-    let mut dest_dir = std::env::current_dir().map_err(|e| e.to_string())?;
-    dest_dir.pop(); // go up from src-tauri to project root
-    dest_dir.push("public");
+fn delete_media(app_handle: tauri::AppHandle, file_path: String) -> Result<(), String> {
+    let media_path = PathBuf::from(&file_path);
+    let mut root = get_data_root(&app_handle)?;
+    root.push("media");
+    
+    if !media_path.starts_with(&root) {
+        return Err("Accès refusé".to_string());
+    }
+
+    if media_path.exists() {
+        fs::remove_file(&media_path).map_err(|e| e.to_string())?;
+        Ok(())
+    } else {
+        Err(format!("File not found: {:?}", media_path))
+    }
+}
+
+#[tauri::command]
+fn import_media(app_handle: tauri::AppHandle, source_path: String) -> Result<String, String> {
+    let mut dest_dir = get_data_root(&app_handle)?;
     dest_dir.push("media");
 
     if !dest_dir.exists() {
@@ -325,13 +389,57 @@ fn import_media(source_path: String) -> Result<String, String> {
 
     fs::copy(src, &dest_path).map_err(|e| e.to_string())?;
 
-    let filename_str = filename.to_str().unwrap_or("");
-    Ok(format!("/media/{}", filename_str))
+    Ok(dest_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn read_text_file(path: String) -> Result<String, String> {
+    fs::read_to_string(path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_app_data_path(app_handle: tauri::AppHandle) -> Result<String, String> {
+    // In Dev, we might want to point to the project's public folder for default backgrounds
+    // In Prod, we always use the app_data_dir
+    let path = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    {
+        // Fix for AppImage crashes on video playback
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        std::env::set_var("WEBKIT_DISABLE_HW_ACCELERATION", "1");
+    }
+
     tauri::Builder::default()
+        .setup(|app| {
+            init_data(app.handle())?;
+            
+            let app_data_path = app.path().app_data_dir().unwrap_or_default();
+            
+            let _ = std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime for warp");
+                rt.block_on(async {
+                    let cors = warp::cors()
+                        .allow_any_origin()
+                        .allow_methods(vec!["GET", "POST", "OPTIONS"])
+                        .allow_headers(vec!["Range", "Content-Type", "Accept", "Origin"]);
+                    
+                    // On ne sert QUE le dossier AppData pour plus de stabilité
+                    let fs_route = warp::path("fs")
+                        .and(warp::fs::dir(app_data_path))
+                        .with(cors);
+                    
+                    println!("Media server (AppData only) running on http://127.0.0.1:11223");
+                    warp::serve(fs_route).run(([127, 0, 0, 1], 11223)).await;
+                });
+            });
+            
+            Ok(())
+        })
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
@@ -354,7 +462,10 @@ pub fn run() {
             list_backgrounds,
             import_background,
             delete_background,
-            import_media
+            import_media,
+            delete_media,
+            get_app_data_path,
+            read_text_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

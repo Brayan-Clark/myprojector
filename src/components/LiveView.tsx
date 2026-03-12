@@ -1,7 +1,8 @@
-import { useEffect, useState, memo } from "react";
+import { useEffect, useState, memo, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { FileText } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 
 const RenderClock = memo(({ clock, currentTime }: { clock: any, currentTime: Date }) => {
   if (!clock.enabled) return null;
@@ -172,11 +173,13 @@ export function LiveView() {
     const saved = localStorage.getItem('live_media');
     return saved ? JSON.parse(saved) : null;
   });
+  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [isContentHidden, setIsContentHidden] = useState<boolean>(false);
   const [overlayColor, setOverlayColor] = useState<'black' | 'white' | null>(null);
   const [textContent, setTextContent] = useState<string | null>(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraDeviceId, setCameraDeviceId] = useState<string | null>(null);
+  const cameraVideoRef = useRef<HTMLVideoElement>(null);
 
   // New features
   const [clock, setClock] = useState<any>({ enabled: false, type: 'digital', position: 'top-right', style: 'modern' });
@@ -206,18 +209,21 @@ export function LiveView() {
 
   const cleanUrl = (url: string) => {
     if (!url || url === '' || url === 'null') return undefined;
-    // Already a converted asset or web URL - pass through
-    if (url.startsWith('asset:') || url.startsWith('http') || url.startsWith('tauri:')) {
+    if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('asset:') || url.startsWith('http') || url.startsWith('tauri:')) {
       return url;
     }
-    // Public backgrounds served by Vite dev server
-    if (url.startsWith('/backgrounds/')) return url;
-    // Absolute filesystem path (Linux: starts with /, Windows: has drive letter like C:\)
-    if (url.startsWith('/') || url.match(/^[A-Za-z]:\\/)) {
-      return convertFileSrc(url);
+    
+    const appDataPath = localStorage.getItem('appDataPath');
+    let relativePath = url;
+    
+    if (appDataPath && url.startsWith(appDataPath)) {
+      relativePath = url.replace(appDataPath, '');
     }
-    return url;
+    
+    const stripped = relativePath.startsWith('/') ? relativePath.slice(1) : relativePath;
+    return `http://127.0.0.1:11223/fs/${encodeURIComponent(stripped).replace(/%2F/g, '/')}`;
   };
+
 
   useEffect(() => {
     const initWindow = async () => {
@@ -304,22 +310,25 @@ export function LiveView() {
   useEffect(() => {
     let stream: MediaStream | null = null;
     const startCam = async () => {
-      if (isCameraActive) {
+      if (isCameraActive && cameraVideoRef.current) {
         try {
           const constraints = {
-            video: cameraDeviceId ? { deviceId: { exact: cameraDeviceId }, width: 1920, height: 1080 } : { width: 1920, height: 1080 }
+            video: cameraDeviceId 
+              ? { deviceId: { exact: cameraDeviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } } 
+              : { width: { ideal: 1920 }, height: { ideal: 1080 } }
           };
           stream = await navigator.mediaDevices.getUserMedia(constraints);
-          const vid = document.getElementById('camera-video') as HTMLVideoElement;
-          if (vid) vid.srcObject = stream;
+          if (cameraVideoRef.current) {
+            cameraVideoRef.current.srcObject = stream;
+            // Force play just in case autoPlay is inhibited
+            cameraVideoRef.current.play().catch(e => console.warn("Camera Play Error:", e));
+          }
         } catch (e) {
-          console.error(e);
-          // Fallback if ID fails
+          console.error("Camera Error:", e);
           if (cameraDeviceId) {
             try {
-              stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1920, height: 1080 } });
-              const vid = document.getElementById('camera-video') as HTMLVideoElement;
-              if (vid) vid.srcObject = stream;
+              stream = await navigator.mediaDevices.getUserMedia({ video: true });
+              if (cameraVideoRef.current) cameraVideoRef.current.srcObject = stream;
             } catch (e2) { setIsCameraActive(false); }
           } else { setIsCameraActive(false); }
         }
@@ -336,11 +345,42 @@ export function LiveView() {
   useEffect(() => {
     if (mediaOverlay && mediaOverlay.type === 'document') {
       const isText = mediaOverlay.url.match(/\.(txt|md)(\?.*)?$/i);
+      const isPdf = mediaOverlay.url.match(/\.pdf(\?.*)?$/i);
+
       if (isText) {
-        fetch(mediaOverlay.url).then(r => r.text()).then(setTextContent).catch(() => setTextContent(null));
-      } else { setTextContent(null); }
-    } else { setTextContent(null); }
+        const fileUrl = mediaOverlay.url;
+        const appDataPath = localStorage.getItem('appDataPath');
+        let fullPath = fileUrl;
+        if (appDataPath && (fileUrl.startsWith('media/') || fileUrl.startsWith('/media/'))) {
+           const stripped = fileUrl.startsWith('/') ? fileUrl.slice(1) : fileUrl;
+           fullPath = `${appDataPath}/${stripped}`;
+        }
+        invoke("read_text_file", { path: fullPath })
+          .then((content: any) => setTextContent(content))
+          .catch(() => setTextContent(null));
+      } else if (isPdf) {
+        // For PDF: Load as blob to bypass "Blocked Plugin" error on Linux AppImage
+        const urlToFetch = cleanUrl(mediaOverlay.url);
+        if (urlToFetch) {
+           fetch(urlToFetch)
+            .then(r => r.blob())
+            .then(blob => {
+              const bolbUrl = URL.createObjectURL(blob);
+              setPdfUrl(bolbUrl);
+            })
+            .catch(e => {
+              console.error("PDF Blob error:", e);
+              setPdfUrl(null);
+            });
+        }
+      } else { setTextContent(null); setPdfUrl(null); }
+    } else { setTextContent(null); setPdfUrl(null); }
+    
+    return () => {
+      if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+    };
   }, [mediaOverlay]);
+
 
 
 
@@ -370,10 +410,11 @@ export function LiveView() {
       {/* Camera Feed */}
       {isCameraActive && (
         <video
-          id="camera-video"
+          ref={cameraVideoRef}
           autoPlay
           playsInline
-          className="absolute inset-0 w-full h-full object-cover z-5"
+          muted
+          className="absolute inset-0 w-full h-full object-cover z-10 bg-black"
         />
       )}
 
@@ -384,11 +425,11 @@ export function LiveView() {
       <RenderClock clock={clock} currentTime={currentTime} />
       <RenderTicker ticker={ticker} />
 
-      <div className={`absolute inset-0 w-full h-full transition-opacity duration-300 ${isContentHidden ? 'opacity-0' : 'opacity-100'}`}>
+      <div className={`absolute inset-0 w-full h-full transition-opacity duration-300 z-20 ${isContentHidden ? 'opacity-0' : 'opacity-100'}`}>
         {mediaOverlay && mediaOverlay.url && (
-          <div className="absolute inset-0 z-30 bg-black flex items-center justify-center">
+          <div className="absolute inset-0 z-40 bg-black flex items-center justify-center">
             {mediaOverlay.type === 'image' && <img src={cleanUrl(mediaOverlay.url)} className="w-full h-full object-contain" alt="Media" />}
-            {mediaOverlay.type === 'video' && <video key={mediaOverlay.url} src={cleanUrl(mediaOverlay.url)} className="w-full h-full object-contain" autoPlay loop muted playsInline preload="auto" />}
+            {mediaOverlay.type === 'video' && <video key={mediaOverlay.url} src={cleanUrl(mediaOverlay.url)} className="w-full h-full object-contain" autoPlay controls playsInline preload="auto" />}
             {mediaOverlay.type === 'audio' && (
               <div className="flex flex-col items-center gap-4">
                 <div className="w-32 h-32 bg-[#5865f2] rounded-full flex items-center justify-center animate-pulse">
@@ -410,8 +451,34 @@ export function LiveView() {
             )}
             {mediaOverlay.type === 'link' && <iframe src={mediaOverlay.url} className="w-full h-full border-none bg-white" title="Web Link" />}
             {mediaOverlay.type === 'document' && (
-              <div className="w-full h-full bg-white text-black overflow-hidden flex items-center justify-center">
-                {textContent ? <div className="p-10 whitespace-pre-wrap font-mono text-lg text-left w-full h-full overflow-y-auto">{textContent}</div> : <iframe src={cleanUrl(mediaOverlay.url)} className="w-full h-full border-none" title="Doc" />}
+              <div className={`w-full h-full bg-white text-black overflow-hidden flex flex-col ${textContent ? 'items-center justify-center p-10' : ''}`}>
+                {textContent ? (
+                   <div className="p-10 whitespace-pre-wrap font-mono text-lg text-left w-full h-full overflow-y-auto">{textContent}</div>
+                ) : mediaOverlay.url.match(/\.pdf(\?.*)?$/i) ? (
+                   <iframe 
+                     src={`${pdfUrl || cleanUrl(mediaOverlay.url)}#view=FitH`} 
+                     width="100%"
+                     height="100%"
+                     className="absolute inset-0 border-none bg-white"
+                     style={{ width: '100%', height: '100%' }}
+                   />
+                ) : (
+                   <div className="flex flex-col items-center gap-4 p-10 text-center">
+                      <div className="w-16 h-16 bg-orange-100 text-orange-600 rounded-full flex items-center justify-center">
+                         <FileText size={32} />
+                      </div>
+                      <p className="font-bold text-gray-800">Ce type de document est projeté.</p>
+                      <p className="text-xs text-gray-500 max-w-md">Si le contenu ne s'affiche pas ici, il est recommandé d'utiliser un format PDF ou de capturer une image du document.</p>
+                      <iframe 
+                        src={`${cleanUrl(mediaOverlay.url)}#view=FitH`} 
+                        width="100%"
+                        height="100%"
+                        className="w-full h-64 border border-gray-200 rounded mt-4" 
+                        style={{ width: '100%', height: '100%' }}
+                        title="Doc fallback" 
+                      />
+                   </div>
+                )}
               </div>
             )}
           </div>

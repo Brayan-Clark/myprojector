@@ -232,11 +232,28 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
     setPlaylist(newList);
   };
 
-  const removeAgendaItem = (e: any, index: number) => {
+  const removeAgendaItem = async (e: any, index: number) => {
     e.stopPropagation();
-    const newList = [...playlist];
-    newList.splice(index, 1);
-    setPlaylist(newList);
+    e.nativeEvent.stopImmediatePropagation(); // Extra safety
+    const item = playlist[index];
+    
+    const confirmMessage = ['image', 'video', 'audio', 'document'].includes(item.type)
+      ? `Supprimer "${item.title}" ?\nCeci effacera le fichier stocké dans public/media.`
+      : `Supprimer "${item.title}" de l'agenda ?`;
+
+    if (window.confirm(confirmMessage)) {
+      try {
+        if (['image', 'video', 'audio', 'document'].includes(item.type) && item.lyrics?.startsWith('/media/')) {
+          await invoke('delete_media', { file_path: item.lyrics }).catch(err => console.warn("File already gone or error:", err));
+        }
+      } catch (err) {
+        console.error('Delete media error:', err);
+      }
+      
+      const newList = [...playlist];
+      newList.splice(index, 1);
+      setPlaylist(newList);
+    }
   };
 
   return (
@@ -268,7 +285,7 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
       <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
         {playlist.length === 0 ? <div className="text-xs text-gray-500 text-center mt-4">Agenda vide</div> : playlist.map((item: any, idx: number) => (
           <div 
-            key={idx} 
+            key={item.id} 
             className={`px-2 py-1.5 rounded hover:bg-[#36393f] cursor-pointer flex items-center gap-2 group transition text-sm ${activeSong?.id === item.id ? 'bg-[#36393f] border-l-2 border-[#5865f2]' : 'border-l-2 border-transparent'}`}
             onClick={() => onSelectSong(item, item.type === 'bible' ? 'bible' : 'hymnes')}
           >

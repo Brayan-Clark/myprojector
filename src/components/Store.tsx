@@ -8,11 +8,21 @@ export function Store({ onInstalled, onLoadDb }: { onInstalled: () => void, onLo
   const [installedBibles, setInstalledBibles] = useState<string[]>([]);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [expandedCats, setExpandedCats] = useState<string[]>(['hymnes', 'bible']);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const loadStore = async () => {
+    setLoading(true);
+    setError(null);
     try {
-      const hymnsRes = await fetch("https://raw.githubusercontent.com/Brayan-Clark/adventools/data/hymnes/manifest.json");
-      const bibleRes = await fetch("https://raw.githubusercontent.com/Brayan-Clark/adventools/data/bible/manifest.json");
+      console.log("Fetching manifests...");
+      const hymnsRes = await fetch("https://raw.githubusercontent.com/Brayan-Clark/adventools/data/hymnes/manifest.json").catch(e => { throw new Error("Erreur réseau: " + e.message); });
+      const bibleRes = await fetch("https://raw.githubusercontent.com/Brayan-Clark/adventools/data/bible/manifest.json").catch(e => { throw new Error("Erreur réseau: " + e.message); });
+      
+      if (!hymnsRes.ok || !bibleRes.ok) {
+        throw new Error(`Erreur HTTP: ${hymnsRes.status} / ${bibleRes.status}`);
+      }
+
       const hData = await hymnsRes.json();
       const bData = await bibleRes.json();
       
@@ -26,7 +36,12 @@ export function Store({ onInstalled, onLoadDb }: { onInstalled: () => void, onLo
       const instB = await invoke<string[]>("list_dbs", { category: "bible" });
       setInstalledHymnes(instH);
       setInstalledBibles(instB);
-    } catch (e) { console.error(e); }
+    } catch (e: any) { 
+      console.error("Store load error:", e); 
+      setError(e.message || "Erreur de chargement inconnue");
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => { loadStore(); }, []);
@@ -119,8 +134,27 @@ export function Store({ onInstalled, onLoadDb }: { onInstalled: () => void, onLo
       </div>
       
       <div className="space-y-8">
-         {renderCategory("hymnes", "Recueils (Chants)")}
-         {renderCategory("bible", "Bibles")}
+         {loading ? (
+            <div className="flex flex-col items-center justify-center py-20 gap-4 opacity-50">
+               <RefreshCw size={32} className="animate-spin text-[#5865f2]" />
+               <p className="text-sm font-bold tracking-widest uppercase">Chargement de la bibliothèque...</p>
+            </div>
+         ) : error ? (
+            <div className="bg-red-500/10 border border-red-500/20 p-6 rounded-lg text-center space-y-4">
+               <p className="text-red-400 font-bold">{error}</p>
+               <button onClick={loadStore} className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-md text-xs font-bold transition">Réessayer</button>
+               <p className="text-[10px] text-gray-500">Vérifiez votre connexion internet et les paramètres de sécurité.</p>
+            </div>
+         ) : manifests.length === 0 ? (
+            <div className="text-center py-20 text-gray-500">
+               <p>Aucun module disponible pour le moment.</p>
+            </div>
+         ) : (
+            <>
+               {renderCategory("hymnes", "Recueils (Chants)")}
+               {renderCategory("bible", "Bibles")}
+            </>
+         )}
       </div>
     </div>
   );

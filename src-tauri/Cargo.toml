@@ -1,8 +1,8 @@
 [package]
-name = "tauri-app"
+name = "myprojector"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "MyProjector c'est un logiciel pour projeter des chants et des textes sur un écran"
+authors = ["Bryan Clark"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -27,6 +27,8 @@ tauri-plugin-shell = "2.0.0-rc.0"
 tauri-plugin-dialog = "2.0.0-rc.0"
 reqwest = { version = "0.13", default-features = false, features = ["stream", "blocking", "native-tls", "json"] }
 tauri-plugin-fs = "2"
+warp = { version = "0.4.2", features = ["server"] }
+tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros"] }
 
 [profile.release]
 # Reduce memory usage during builds by limiting parallel codegen units
