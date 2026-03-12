@@ -90,27 +90,33 @@ export function RightProjection({
     const startCam = async () => {
       if (isCameraActive && previewVideoRef.current) {
         try {
-          const constraints = {
-            video: selectedCamera 
-              ? { deviceId: { exact: selectedCamera }, width: { ideal: 1280 }, height: { ideal: 720 } } 
-              : { width: { ideal: 1280 }, height: { ideal: 720 } }
-          };
+          // Simplified constraints for better compatibility
+          const constraints = selectedCamera 
+            ? { video: { deviceId: { exact: selectedCamera } } }
+            : { video: true };
+            
+          console.log("RightProjection: Starting camera with constraints:", constraints);
           stream = await navigator.mediaDevices.getUserMedia(constraints);
           if (previewVideoRef.current) {
             previewVideoRef.current.srcObject = stream;
-            previewVideoRef.current.play().catch(() => {});
+            previewVideoRef.current.play().catch(e => console.warn("Video play failed:", e));
           }
-        } catch (e) {
-          console.error("Preview Camera Error:", e);
-          // Fallback
+        } catch (e: any) {
+          console.error("Preview Camera Error:", e.name, e.message);
+          // Fallback to absolute minimum
           try {
+             console.log("RightProjection: Fallback to basic video:true");
              stream = await navigator.mediaDevices.getUserMedia({ video: true });
              if (previewVideoRef.current) {
                previewVideoRef.current.srcObject = stream;
                previewVideoRef.current.play().catch(() => {});
              }
-          } catch(e2) {}
+          } catch (e2) {
+             console.error("Absolute camera failure:", e2);
+          }
         }
+      } else if (!isCameraActive && previewVideoRef.current) {
+        previewVideoRef.current.srcObject = null;
       }
     };
     startCam();

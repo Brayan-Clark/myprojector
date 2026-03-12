@@ -280,15 +280,23 @@ export function Toolbar({
               className={`flex items-center gap-2 px-4 py-1.5 rounded-md transition-all text-xs font-bold ${isCameraActive ? 'bg-orange-500 text-white shadow-[0_0_15px_rgba(249,115,22,0.4)]' : 'hover:bg-[#3f4147] text-gray-400 group-hover/cam:text-gray-200'}`}
               onClick={async () => {
                 const next = !isCameraActive;
+                console.log("Toggling camera. Target state:", next);
                 
-                // If opening, try to get permissions to "unlock" labels and virtual cams
                 if (next) {
+                  // 1. Refresh before to see what's there
+                  if (refreshCameras) await refreshCameras();
+
                   try {
+                    // 2. Try to get permission (unblocks labels)
+                    console.log("Requesting camera access...");
                     const stream = await navigator.mediaDevices.getUserMedia({ video: true });
                     stream.getTracks().forEach(t => t.stop());
+                    console.log("Access granted, refreshing list...");
                     if (refreshCameras) await refreshCameras();
-                  } catch (e) {
-                    console.warn("Permission denied or failed:", e);
+                  } catch (e: any) {
+                    console.warn("Could not get camera permission or device busy:", e.name, e.message);
+                    // Still refresh, maybe we can see the devices without labels
+                    if (refreshCameras) await refreshCameras();
                   }
                 }
 

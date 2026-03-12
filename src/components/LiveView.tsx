@@ -312,26 +312,33 @@ export function LiveView() {
     const startCam = async () => {
       if (isCameraActive && cameraVideoRef.current) {
         try {
-          const constraints = {
-            video: cameraDeviceId 
-              ? { deviceId: { exact: cameraDeviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } } 
-              : { width: { ideal: 1920 }, height: { ideal: 1080 } }
-          };
+          const constraints = cameraDeviceId 
+            ? { video: { deviceId: { exact: cameraDeviceId } } }
+            : { video: true };
+            
+          console.log("LiveView: Starting camera with:", constraints);
           stream = await navigator.mediaDevices.getUserMedia(constraints);
           if (cameraVideoRef.current) {
             cameraVideoRef.current.srcObject = stream;
-            // Force play just in case autoPlay is inhibited
-            cameraVideoRef.current.play().catch(e => console.warn("Camera Play Error:", e));
+            cameraVideoRef.current.play().catch(e => console.warn("Video play failed:", e));
           }
-        } catch (e) {
-          console.error("Camera Error:", e);
-          if (cameraDeviceId) {
-            try {
-              stream = await navigator.mediaDevices.getUserMedia({ video: true });
-              if (cameraVideoRef.current) cameraVideoRef.current.srcObject = stream;
-            } catch (e2) { setIsCameraActive(false); }
-          } else { setIsCameraActive(false); }
+        } catch (e: any) {
+          console.error("Live Camera Error:", e.name, e.message);
+          // Fallback to simple video:true
+          try {
+             console.log("LiveView: Fallback to basic video:true");
+             stream = await navigator.mediaDevices.getUserMedia({ video: true });
+             if (cameraVideoRef.current) {
+               cameraVideoRef.current.srcObject = stream;
+               cameraVideoRef.current.play().catch(() => {});
+             }
+          } catch (e2) {
+             console.error("Live Camera critical failure:", e2);
+             setIsCameraActive(false);
+          }
         }
+      } else if (!isCameraActive && cameraVideoRef.current) {
+        cameraVideoRef.current.srcObject = null;
       }
     };
     startCam();
