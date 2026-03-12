@@ -34,21 +34,41 @@ function App() {
   const refreshCameras = async () => {
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
+      console.log("Devices list:", devices.map(d => ({ kind: d.kind, label: d.label, id: d.deviceId })));
       const cams = devices.filter(d => d.kind === 'videoinput');
       setCameraList(cams);
-      if (cams.length > 0 && !selectedCamera) {
-        setSelectedCamera(cams[0].deviceId);
+      
+      if (cams.length > 0) {
+        if (!selectedCamera || !cams.find(c => c.deviceId === selectedCamera)) {
+          setSelectedCamera(cams[0].deviceId);
+        }
       }
     } catch (e) {
-      console.warn("Failed to enumerate initially:", e);
+      console.warn("Failed to enumerate cameras:", e);
     }
   };
 
   useEffect(() => {
     refreshCameras();
-    navigator.mediaDevices.addEventListener('devicechange', refreshCameras);
-    return () => navigator.mediaDevices.removeEventListener('devicechange', refreshCameras);
-  }, [selectedCamera]);
+    
+    // Refresh periodically if camera is active
+    const interval = setInterval(() => {
+      if (isCameraActive) {
+        refreshCameras();
+      }
+    }, 5000);
+
+    const handleDeviceChange = () => {
+      console.log("Devices changed, refreshing...");
+      refreshCameras();
+    };
+
+    navigator.mediaDevices.addEventListener('devicechange', handleDeviceChange);
+    return () => {
+      navigator.mediaDevices.removeEventListener('devicechange', handleDeviceChange);
+      clearInterval(interval);
+    };
+  }, [isCameraActive]);
 
   // Store app data path in localStorage so LiveView and other windows can use it
   useEffect(() => {
