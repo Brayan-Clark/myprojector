@@ -409,17 +409,50 @@ fn get_app_data_path(app_handle: tauri::AppHandle) -> Result<String, String> {
 pub fn run() {
     #[cfg(target_os = "linux")]
     {
-        // Fix for AppImage crashes on video playback
+        // Fix for AppImage -- disable GPU compositing to prevent green screen artifacts
+        // NOTE: We intentionally do NOT disable HW_ACCELERATION as that breaks video playback
         std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
-        std::env::set_var("WEBKIT_DISABLE_HW_ACCELERATION", "1");
+        
+        // Force GStreamer to use bundled plugins (important for AppImage)
+        // This avoids conflicts with system gstreamer plugins that may not support H264/VP8
+        if std::env::var("APPDIR").is_ok() {
+            // We are running inside an AppImage
+            let appdir = std::env::var("APPDIR").unwrap_or_default();
+            let gst_plugin_path = format!("{}/usr/lib/x86_64-linux-gnu/gstreamer-1.0", appdir);
+            if std::path::Path::new(&gst_plugin_path).exists() {
+                std::env::set_var("GST_PLUGIN_PATH", &gst_plugin_path);
+                std::env::set_var("GST_PLUGIN_SYSTEM_PATH_1_0", &gst_plugin_path);
+            }
+        }
     }
 
     tauri::Builder::default()
         .setup(|app| {
             init_data(app.handle())?;
             
-            let app_data_path = app.path().app_data_dir().unwrap_or_default();
+            let _app_data_path = app.path().app_data_dir().unwrap_or_default();
             
+            // Fix for Linux Camera Permissions - Initial windows
+            #[cfg(target_os = "linux")]
+            {
+                use webkit2gtk::WebViewExt;
+                use webkit2gtk::PermissionRequestExt;
+                use webkit2gtk::glib::Cast;
+                for window in app.webview_windows().values() {
+                    let _ = window.with_webview(|webview| {
+                        let webkit_webview = webview.inner();
+                        webkit_webview.connect_permission_request(|_view, request: &webkit2gtk::PermissionRequest| {
+                            if let Ok(user_media_request) = request.clone().downcast::<webkit2gtk::UserMediaPermissionRequest>() {
+                                println!("Granting camera/mic permission for window on Linux");
+                                user_media_request.allow();
+                                return true; 
+                            }
+                            false 
+                        });
+                    });
+                }
+            }
+
             let _ = std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime for warp");
                 rt.block_on(async {
@@ -430,7 +463,7 @@ pub fn run() {
                     
                     // On ne sert QUE le dossier AppData pour plus de stabilité
                     let fs_route = warp::path("fs")
-                        .and(warp::fs::dir(app_data_path))
+                        .and(warp::fs::dir(_app_data_path))
                         .with(cors);
                     
                     println!("Media server (AppData only) running on http://127.0.0.1:11223");
@@ -444,13 +477,49 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
-        .on_window_event(|window, event| match event {
-            tauri::WindowEvent::CloseRequested { .. } => {
-                if window.label() == "main" {
-                    window.app_handle().exit(0);
+        .on_window_event(|window, event| {
+            // Fix for Linux Camera Permissions - Robust handling for ALL windows
+            #[cfg(target_os = "linux")]
+            {
+                use webkit2gtk::WebViewExt;
+                use webkit2gtk::PermissionRequestExt;
+                use webkit2gtk::glib::Cast;
+                use webkit2gtk::glib::ObjectExt;
+                use tauri::Manager;
+                
+                // On récupère le WebviewWindow correspondant à cette fenêtre
+                if let Some(webview_window) = window.get_webview_window(window.label()) {
+                    let _ = webview_window.with_webview(|platform_webview: tauri::webview::PlatformWebview| {
+                        let webkit_webview = platform_webview.inner();
+                        
+                        // On utilise un tag GLib pour ne pas connecter le signal plusieurs fois
+                        let has_handler = unsafe { 
+                            webkit_webview.data::<bool>("permission_handler_attached").is_some() 
+                        };
+
+                        if !has_handler {
+                            webkit_webview.connect_permission_request(|_view, request: &webkit2gtk::PermissionRequest| {
+                                if let Ok(user_media_request) = request.clone().downcast::<webkit2gtk::UserMediaPermissionRequest>() {
+                                    println!("Granting camera/mic permission for window: Linux native");
+                                    user_media_request.allow();
+                                    return true;
+                                }
+                                false
+                            });
+                            unsafe { webkit_webview.set_data("permission_handler_attached", true); }
+                        }
+                    });
                 }
             }
-            _ => {}
+
+            match event {
+                tauri::WindowEvent::CloseRequested { .. } => {
+                    if window.label() == "main" {
+                        window.app_handle().exit(0);
+                    }
+                }
+                _ => {}
+            }
         })
         .invoke_handler(tauri::generate_handler![
             fetch_hymns,

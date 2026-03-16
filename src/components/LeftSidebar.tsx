@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { Save, FolderOpen, X, BookOpen, Music, Search as SearchIcon, List, Download, Plus, Trash2, ChevronUp, ChevronDown, FileText, Image as ImageIcon, Video, Type, Settings, Heart, Headphones, Youtube, Globe } from 'lucide-react';
 import { Store } from './Store';
 import Fuse from 'fuse.js';
@@ -6,14 +6,19 @@ import { invoke } from '@tauri-apps/api/core';
 
 export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoading, onLoadDb, activeSong, searchFocusTrigger, favoriteDbs, toggleFavoriteDb }: any) {
   const searchRef = useRef<HTMLInputElement>(null);
-  const [searchTerm, setSearchTerm] = useState('');
   const [view, setView] = useState('chant'); // 'chant' | 'bible' | 'store' | 'settings'
+  const [hymneSearchTerm, setHymneSearchTerm] = useState('');
+  const [bibleSearchTerm, setBibleSearchTerm] = useState('');
+  const searchTerm = view === 'chant' ? hymneSearchTerm : bibleSearchTerm;
+  const setSearchTerm = (val: string) => view === 'chant' ? setHymneSearchTerm(val) : setBibleSearchTerm(val);
   const [dbs, setDbs] = useState<string[]>([]);
   const [activeDb, setActiveDb] = useState("");
   // Bible specific state
   const [selectedBook, setSelectedBook] = useState("");
   const [selectedChapter, setSelectedChapter] = useState("");
   const [showAddMenu, setShowAddMenu] = useState(false);
+  // Custom confirm dialog state (replaces window.confirm which doesn't work in Tauri/WebKit)
+  const [confirmDialog, setConfirmDialog] = useState<{ message: string; onConfirm: () => void } | null>(null);
 
   useEffect(() => {
     if (searchFocusTrigger > 0) {
@@ -60,14 +65,14 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
     fetchDbs();
   }, [view, favoriteDbs]);
 
-  const fuse = new Fuse(songs, {
+  const fuse = useMemo(() => new Fuse(songs, {
     keys: ['title', 'number', 'book'],
     threshold: 0.3
-  });
+  }), [songs]);
 
-  const searchResults = searchTerm 
+  const searchResults = useMemo(() => searchTerm 
       ? fuse.search(searchTerm).map(result => result.item)
-      : songs;
+      : songs, [fuse, searchTerm, songs]);
 
   const getDbDisplayName = (db: string) => {
     const base = db.replace('.db', '').replace('.SQLite3', '');
@@ -238,26 +243,72 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
     const item = playlist[index];
     
     const confirmMessage = ['image', 'video', 'audio', 'document'].includes(item.type)
-      ? `Supprimer "${item.title}" ?\nCeci effacera le fichier stocké dans public/media.`
+      ? `Supprimer "${item.title}" ?\n\nLe fichier stocké sera supprimé définitivement.`
       : `Supprimer "${item.title}" de l'agenda ?`;
 
-    if (window.confirm(confirmMessage)) {
-      try {
-        if (['image', 'video', 'audio', 'document'].includes(item.type) && item.lyrics?.startsWith('/media/')) {
-          await invoke('delete_media', { file_path: item.lyrics }).catch(err => console.warn("File already gone or error:", err));
+    // Use custom React dialog instead of window.confirm() which doesn't work in Tauri/WebKit
+    setConfirmDialog({
+      message: confirmMessage,
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        try {
+          // The stored path is an absolute path (from import_media which returns absolute path)
+          if (['image', 'video', 'audio', 'document'].includes(item.type) && item.lyrics) {
+            const lyricsPath = item.lyrics as string;
+            // Handle both absolute paths and relative /media/ paths
+            let absolutePath = lyricsPath;
+            if (lyricsPath.startsWith('/media/') || lyricsPath.startsWith('media/')) {
+              const appDataPath = localStorage.getItem('appDataPath') || '';
+              const stripped = lyricsPath.startsWith('/') ? lyricsPath.slice(1) : lyricsPath;
+              absolutePath = `${appDataPath}/${stripped}`;
+            }
+            // Only delete if it's a local file (not a URL or youtube)
+            if (!lyricsPath.startsWith('http') && !lyricsPath.startsWith('blob:') && !lyricsPath.startsWith('data:')) {
+              await invoke('delete_media', { file_path: absolutePath }).catch((err: any) => console.warn("File delete warning:", err));
+            }
+          }
+        } catch (err) {
+          console.error('Delete media error:', err);
         }
-      } catch (err) {
-        console.error('Delete media error:', err);
+        const newList = [...playlist];
+        newList.splice(index, 1);
+        setPlaylist(newList);
       }
-      
-      const newList = [...playlist];
-      newList.splice(index, 1);
-      setPlaylist(newList);
-    }
+    });
   };
 
   return (
     <div className="w-80 bg-[#202225] h-full flex flex-col border-r border-[#18191c]">
+      {/* Custom Confirmation Modal Dialog */}
+      {confirmDialog && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center" style={{ backgroundColor: 'rgba(0,0,0,0.7)' }}>
+          <div className="bg-[#2b2d31] border border-[#36393f] rounded-lg shadow-2xl p-6 max-w-sm w-full mx-4">
+            <div className="flex items-start gap-3 mb-5">
+              <div className="w-10 h-10 rounded-full bg-red-500/20 flex items-center justify-center shrink-0 mt-0.5">
+                <Trash2 size={18} className="text-red-400" />
+              </div>
+              <div>
+                <p className="text-white font-bold text-sm mb-1">Confirmer la suppression</p>
+                <p className="text-gray-300 text-xs whitespace-pre-line leading-relaxed">{confirmDialog.message}</p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                className="px-4 py-2 text-xs font-bold text-gray-300 hover:text-white bg-[#36393f] hover:bg-[#3f4147] rounded transition"
+                onClick={() => setConfirmDialog(null)}
+              >
+                Annuler
+              </button>
+              <button
+                className="px-4 py-2 text-xs font-bold text-white bg-red-600 hover:bg-red-700 rounded transition"
+                onClick={confirmDialog.onConfirm}
+              >
+                Supprimer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="flex-1 flex flex-col min-h-0 border-b border-[#18191c]">
         <div className="p-2 bg-[#2b2d31] flex items-center justify-between border-b border-[#18191c]">
            <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-2 text-gray-300">
@@ -345,15 +396,30 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
                       <li>Alt+P : Lancer 1er Agenda</li>
                       <li>Alt+L : Activer/Off LIVE</li>
                       <li>Alt+H : Cacher le Contenu</li>
+                      <li><b>Alt+N</b> : Écran Noir</li>
+                      <li><b>Alt+W</b> : Écran Blanc</li>
+                      <li><b>Alt+R</b> : Réveil (Enlever overlay)</li>
+                      <li><b>Alt+C</b> : Toggle Horloge</li>
+                      <li><b>Alt+M</b> : Toggle Message Défilant</li>
                       <li>Alt+Enter : PROJETER sélection</li>
                       <li>Haut/Bas : Changer Diapo</li>
+                      <li className="text-green-400"><b>↓ (fin de chant)</b> : Retour Écran de Base</li>
                    </ul>
              </div>
              <div>
-                <h3 className="font-bold text-[#5865f2] mb-1">Support</h3>
+                <h3 className="font-bold text-[#5865f2] mb-1">Caméra Virtuelle (DroidCam)</h3>
+                <ul className="list-disc pl-4 opacity-80 space-y-0.5">
+                   <li>Lancez DroidCam <b>avant</b> d'activer</li>
+                   <li>Cliquez <b>Caméra</b> dans la barre d'outils</li>
+                   <li>Si non détecté: cliquez <b>⟳ Rafraîchir</b></li>
+                </ul>
+             </div>
+             <div>
+                <h3 className="font-bold text-[#5865f2] mb-1">Support Fichiers</h3>
                 <ul className="list-disc pl-4 opacity-80">
                    <li>Docs: PDF, TXT, MD</li>
                    <li>Office: Convertir en PDF</li>
+                   <li>Média: Images, Vidéos, Audio</li>
                 </ul>
              </div>
           </div>

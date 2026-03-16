@@ -40,6 +40,11 @@
     "resources": [
       "data/**/*",
       "../public/backgrounds/**/*"
-    ]
+    ],
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": true
+      }
+    }
   }
 }

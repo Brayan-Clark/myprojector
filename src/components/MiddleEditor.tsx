@@ -1,13 +1,21 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useLayoutEffect } from 'react';
 import { FileText, Plus, Save, Edit3, Eye } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
-export function MiddleEditor({ activeSong, onSave }: { activeSong: any, onSave: (s:any) => void }) {
+export function MiddleEditor({ 
+  activeSong, onSave, pdfWidth, setPdfWidth, pdfHeight, setPdfHeight 
+}: { 
+  activeSong: any, onSave: (s:any) => void, 
+  pdfWidth: number, setPdfWidth: (v: number) => void,
+  pdfHeight: number, setPdfHeight: (v: number) => void
+}) {
   const [isEditing, setIsEditing] = useState(false);
   const [localTitle, setLocalTitle] = useState("");
   const [localContent, setLocalContent] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [pdfBlobUrl, setPdfBlobUrl] = useState<string | null>(null);
   const [textContent, setTextContent] = useState<string | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
 
   useEffect(() => {
     if (activeSong) {
@@ -46,6 +54,20 @@ export function MiddleEditor({ activeSong, onSave }: { activeSong: any, onSave: 
     }
     return () => { if (pdfBlobUrl) URL.revokeObjectURL(pdfBlobUrl); };
   }, [activeSong?.id, activeSong?.lyrics]);
+
+  useLayoutEffect(() => {
+    if (!containerRef.current) return;
+    const observer = new ResizeObserver((entries) => {
+      for (let entry of entries) {
+        setContainerSize({
+          width: entry.contentRect.width,
+          height: entry.contentRect.height
+        });
+      }
+    });
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, []);
 
   const handleSave = async () => {
     if (!activeSong) return;
@@ -105,7 +127,7 @@ export function MiddleEditor({ activeSong, onSave }: { activeSong: any, onSave: 
   return (
     <div className="flex-1 flex flex-col min-w-0 bg-[#36393f]">
       {/* En-tête Editeur */}
-      <div className="h-10 bg-[#2f3136] flex items-center px-4 border-b border-[#202225] gap-4">
+      <div className="h-10 bg-[#2f3136] flex items-center px-4 border-b border-[#202225] gap-4 flex-shrink-0">
         <div className="flex items-center gap-2 text-[#5865f2] font-semibold text-sm">
            <FileText size={16} /> Paroles
         </div>
@@ -123,7 +145,31 @@ export function MiddleEditor({ activeSong, onSave }: { activeSong: any, onSave: 
               <Edit3 size={12} /> Éditer
            </button>
         </div>
-        <div className="ml-auto flex gap-2">
+        <div className="ml-auto flex items-center gap-3">
+           {!isEditing && activeSong?.type === 'document' && (
+              <div className="flex items-center gap-3 bg-[#202225] px-2 py-0.5 rounded border border-[#18191c]">
+                 <div className="flex items-center gap-1">
+                    <span className="text-[9px] text-gray-400 font-bold">L:</span>
+                    <input 
+                       type="range" min="10" max="400" value={pdfWidth} 
+                       onChange={(e) => setPdfWidth(parseInt(e.target.value))}
+                       className="w-12 h-1 accent-[#5865f2] cursor-pointer"
+                    />
+                 </div>
+                 <div className="flex items-center gap-1">
+                    <span className="text-[9px] text-gray-400 font-bold">H:</span>
+                    <input 
+                       type="range" min="10" max="400" value={pdfHeight} 
+                       onChange={(e) => setPdfHeight(parseInt(e.target.value))}
+                       className="w-12 h-1 accent-[#5865f2] cursor-pointer"
+                    />
+                 </div>
+                 <button 
+                    onClick={() => { setPdfWidth(100); setPdfHeight(100); }}
+                    className="text-[9px] bg-[#36393f] px-1 rounded hover:bg-[#4752c4] transition font-bold"
+                 >RÀZ</button>
+              </div>
+           )}
            <button className="text-gray-400 hover:text-white transition" title="Ajouter un chant"><Plus size={16} /></button>
            {isEditing && (
               <button 
@@ -156,65 +202,73 @@ export function MiddleEditor({ activeSong, onSave }: { activeSong: any, onSave: 
          </div>
       </div>
 
-      {/* Editeur Texte */}
-      <div className="flex-1 p-4 overflow-y-auto relative">
-         {(activeSong?.type === 'image' || activeSong?.type === 'video' || activeSong?.type === 'audio' || activeSong?.type === 'document') ? (
-            <div className={`w-full h-full flex flex-col rounded border border-[#202225] overflow-hidden relative ${activeSong?.type === 'document' ? '' : 'items-center justify-center gap-4 p-4 bg-black/20'}`}>
-             <div className="absolute top-2 right-2 bg-black/80 text-white px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider z-10">
-               {activeSong.type}
-             </div>
-             {activeSong.type === 'image' && <img src={cleanUrl(localContent)} className="max-w-full max-h-full object-contain" alt="Aperçu image" />}
-             {activeSong.type === 'video' && <video src={cleanUrl(localContent)} className="max-w-full max-h-full object-contain" controls playsInline preload="auto" />}
-             {activeSong.type === 'audio' && (
-               <div className="flex flex-col items-center gap-4 w-full">
-                 <div className="w-20 h-20 bg-[#5865f2] rounded-full flex items-center justify-center shadow-lg shadow-[#5865f2]/30">
-                   <svg className="w-10 h-10 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
-                   </svg>
+      {/* Editeur Texte — layout adaptatif selon le type */}
+      {(activeSong?.type === 'image' || activeSong?.type === 'video' || activeSong?.type === 'audio' || activeSong?.type === 'document') ? (
+        <div className="flex-1 flex flex-col overflow-hidden relative" style={{ minHeight: 0 }}>
+          {activeSong.type === 'document' ? (
+            /* ---- PDF / Texte (Structure simplifiée pour WebKitGTK) ---- */
+            <div ref={containerRef} className="absolute inset-0 bg-white overflow-hidden">
+               {textContent ? (
+                 <div className="absolute inset-0 overflow-auto p-4 font-mono text-sm bg-[#18191c] text-[#d1d5db]">
+                   {textContent}
                  </div>
-                 <p className="text-xs text-gray-400 truncate max-w-full text-center">{activeSong.title}</p>
-                 <audio key={localContent} src={cleanUrl(localContent)} controls className="w-full max-w-sm" />
-                 <p className="text-[10px] text-gray-600 italic text-center">Lecture locale uniquement — non projeté sur l'écran de présentation</p>
-               </div>
-             )}
-              {activeSong.type === 'document' && (
-                pdfBlobUrl ? (
-                  <iframe 
-                    src={`${pdfBlobUrl}#view=FitH`} 
-                    width="100%"
-                    height="100%"
-                    className="absolute inset-0 border-none bg-white"
-                    style={{ width: '100%', height: '100%' }}
-                    title="Aperçu PDF"
-                  />
-                ) : textContent ? (
-                  <div className="w-full h-full bg-[#18191c] p-4 text-gray-200 overflow-y-auto font-mono text-sm whitespace-pre-wrap">
-                    {textContent}
-                  </div>
-                ) : (
-                  <iframe 
-                    src={`${cleanUrl(localContent)}#view=FitH`} 
-                    width="100%"
-                    height="100%"
-                    className="w-full h-full border-none bg-white" 
-                    style={{ width: '100%', height: '100%' }}
-                    title="Aperçu document" 
-                  />
-                )
+               ) : (
+                 <div style={{ width: '100%', height: '100%', overflow: 'auto' }}>
+                    <iframe
+                       key={pdfBlobUrl || localContent}
+                       src={pdfBlobUrl ? `${pdfBlobUrl}#toolbar=1&view=FitH` : `${cleanUrl(localContent)}#view=FitH`}
+                       style={{
+                         width: containerSize.width > 0 ? `${(containerSize.width * pdfWidth) / 100}px` : '100%',
+                         height: containerSize.height > 0 ? `${(containerSize.height * pdfHeight) / 100}px` : '100%',
+                         border: 'none',
+                         display: 'block',
+                         backgroundColor: 'white'
+                       }}
+                    />
+                 </div>
+               )}
+            </div>
+          ) : (
+            /* ---- Image / Vidéo / Audio ---- */
+            <div className="flex-1 flex items-center justify-center bg-black/20 relative" style={{ minHeight: 0 }}>
+              <div className="absolute top-2 right-2 bg-black/80 text-white px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider z-10">
+                {activeSong.type}
+              </div>
+              {activeSong.type === 'image' && <img src={cleanUrl(localContent)} className="max-w-full max-h-full object-contain" alt="Aperçu image" />}
+              {activeSong.type === 'video' && (
+                <video src={cleanUrl(localContent)} className="max-w-full max-h-full object-contain" controls playsInline preload="auto" style={{ display: 'block' }} />
               )}
-           </div>
-         ) : isEditing ? (
-           <textarea 
+              {activeSong.type === 'audio' && (
+                <div className="flex flex-col items-center gap-4 w-full p-4">
+                  <div className="w-20 h-20 bg-[#5865f2] rounded-full flex items-center justify-center shadow-lg shadow-[#5865f2]/30">
+                    <svg className="w-10 h-10 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+                    </svg>
+                  </div>
+                  <p className="text-xs text-gray-400 truncate max-w-full text-center">{activeSong.title}</p>
+                  <audio key={localContent} src={cleanUrl(localContent)} controls className="w-full max-w-sm" />
+                  <p className="text-[10px] text-gray-600 italic text-center">Lecture locale uniquement — non projeté sur l'écran de présentation</p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      ) : (
+        /* ====== MODE TEXTE / EDIT ====== */
+        <div className="flex-1 p-4 overflow-y-auto">
+          {isEditing ? (
+            <textarea
               className="w-full h-full bg-[#18191c] p-3 rounded text-gray-200 resize-none outline-none leading-relaxed text-sm font-medium ring-1 ring-[#5865f2]"
               value={localContent}
               onChange={(e) => setLocalContent(e.target.value)}
-           />
-         ) : (
-           <div className="w-full h-full text-gray-200 whitespace-pre-line leading-relaxed text-sm font-medium">
-             {localContent}
-           </div>
-         )}
-      </div>
+            />
+          ) : (
+            <div className="w-full text-gray-200 whitespace-pre-line leading-relaxed text-sm font-medium">
+              {localContent}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Footer Meta */}
       <div className="p-2 border-t border-[#202225] bg-[#2f3136] flex gap-4 text-xs">

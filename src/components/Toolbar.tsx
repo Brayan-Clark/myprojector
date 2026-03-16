@@ -4,7 +4,7 @@ import {
   MonitorOff, Play, Image, Video, Plus, StopCircle,
   Settings2, Trash2, EyeOff, Eye, Presentation,
   AlignVerticalJustifyCenter, AlignVerticalJustifyStart, AlignVerticalJustifyEnd,
-  ChevronDown, Camera, Type, List, Clock, MessageSquare
+  ChevronDown, Camera, Type, List, Clock, MessageSquare, RefreshCw, AlertCircle
 } from 'lucide-react';
 
 
@@ -18,7 +18,8 @@ export function Toolbar({
   isCameraActive, setIsCameraActive,
   clockSettings, setClockSettings,
   tickerSettings, setTickerSettings,
-  refreshCameras
+  refreshCameras, setOverlayColor,
+  cameraError
 }: any) {
   const [activeMediaMenu, setActiveMediaMenu] = useState<'image' | 'video' | 'clock' | 'ticker' | null>(null);
   const [showFontDropdown, setShowFontDropdown] = useState(false);
@@ -283,21 +284,8 @@ export function Toolbar({
                 console.log("Toggling camera. Target state:", next);
                 
                 if (next) {
-                  // 1. Refresh before to see what's there
-                  if (refreshCameras) await refreshCameras();
-
-                  try {
-                    // 2. Try to get permission (unblocks labels)
-                    console.log("Requesting camera access...");
-                    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-                    stream.getTracks().forEach(t => t.stop());
-                    console.log("Access granted, refreshing list...");
-                    if (refreshCameras) await refreshCameras();
-                  } catch (e: any) {
-                    console.warn("Could not get camera permission or device busy:", e.name, e.message);
-                    // Still refresh, maybe we can see the devices without labels
-                    if (refreshCameras) await refreshCameras();
-                  }
+                  // Force label unlock on first activate
+                  if (refreshCameras) await refreshCameras(true);
                 }
 
                 setIsCameraActive(next);
@@ -321,20 +309,60 @@ export function Toolbar({
                     emit('set_camera_id', e.target.value);
                   }}
                 >
-                  {cameraList.map((c: any) => <option key={c.deviceId} value={c.deviceId} className="bg-[#2b2d31] text-white">{c.label || `Source ${c.deviceId.slice(0,4)}`}</option>)}
+                  {cameraList.map((c: any) => <option key={c.deviceId} value={c.deviceId} className="bg-[#2b2d31] text-white">
+                    {c.label || `Caméra #${c.deviceId.slice(0,4)}...`}
+                  </option>)}
                 </select>
+                <button
+                  className="ml-1 p-1 rounded hover:bg-[#3f4147] text-gray-400 hover:text-[#5865f2] transition"
+                  title="Rafraîchir les sources caméra"
+                  onClick={async () => { if (refreshCameras) await refreshCameras(true); }}
+                >
+                  <RefreshCw size={10} />
+                </button>
               </div>
             )}
-            {isCameraActive && cameraList.length === 0 && (
-               <span className="text-[10px] text-red-400 font-bold px-2 animate-pulse">Aucune source déctectée</span>
+            {isCameraActive && cameraList.length === 0 && !cameraError && (
+               <div className="flex items-center gap-1 px-2">
+                 <span className="text-[10px] text-red-400 font-bold animate-pulse">Aucune source</span>
+                 <button
+                   className="p-0.5 rounded hover:bg-[#3f4147] text-gray-400 hover:text-[#5865f2] transition"
+                   title="Rafraîchir / Chercher DroidCam"
+                   onClick={async () => { if (refreshCameras) await refreshCameras(true); }}
+                 >
+                   <RefreshCw size={10} />
+                 </button>
+               </div>
+            )}
+            {isCameraActive && cameraError && (
+               <div className="flex items-center gap-1 px-2 max-w-[150px]">
+                 <AlertCircle size={10} className="text-red-400 shrink-0" />
+                 <span className="text-[9px] text-red-400 font-bold truncate" title={cameraError}>{cameraError}</span>
+                 <button
+                   className="p-0.5 rounded hover:bg-[#3f4147] text-gray-400 hover:text-[#5865f2] transition shrink-0"
+                   title="Réessayer"
+                   onClick={async () => { if (refreshCameras) await refreshCameras(true); }}
+                 >
+                   <RefreshCw size={10} />
+                 </button>
+               </div>
             )}
           </div>
 
           <div className="w-px h-6 bg-[#2b2d31] mx-0.5"></div>
 
-          <button className="w-6 h-6 rounded bg-black border border-gray-600 hover:border-white transition shrink-0" title="Noir" onClick={async () => { (await import('@tauri-apps/api/event')).emit('update_live_overlay', 'black') }}></button>
-          <button className="w-6 h-6 rounded bg-white border border-gray-600 hover:border-black transition shrink-0" title="Blanc" onClick={async () => { (await import('@tauri-apps/api/event')).emit('update_live_overlay', 'white') }}></button>
-          <button className="w-6 h-6 rounded bg-gray-500/20 border border-gray-500 hover:bg-gray-500/40 transition flex items-center justify-center shrink-0" title="Réveil" onClick={async () => { (await import('@tauri-apps/api/event')).emit('update_live_overlay', null) }}><MonitorOff size={12} /></button>
+          <button className="w-6 h-6 rounded bg-black border border-gray-600 hover:border-white transition shrink-0" title="Écran Noir (Alt+N)" onClick={async () => {
+            setOverlayColor?.('black');
+            (await import('@tauri-apps/api/event')).emit('update_live_overlay', 'black');
+          }}></button>
+          <button className="w-6 h-6 rounded bg-white border border-gray-600 hover:border-black transition shrink-0" title="Écran Blanc (Alt+W)" onClick={async () => {
+            setOverlayColor?.('white');
+            (await import('@tauri-apps/api/event')).emit('update_live_overlay', 'white');
+          }}></button>
+          <button className="w-6 h-6 rounded bg-gray-500/20 border border-gray-500 hover:bg-gray-500/40 transition flex items-center justify-center shrink-0" title="Réveil (Alt+R)" onClick={async () => {
+            setOverlayColor?.(null);
+            (await import('@tauri-apps/api/event')).emit('update_live_overlay', null);
+          }}><MonitorOff size={12} /></button>
           <button className={`w-6 h-6 rounded border transition flex items-center justify-center shrink-0 ${isBaseScreenProjected ? 'bg-[#5865f2] text-white border-white' : 'bg-[#18191c] text-gray-400 border-gray-600 hover:border-[#5865f2]'}`} title="Accueil" onClick={async () => {
             setIsBaseScreenProjected(true);
             const { emit } = await import('@tauri-apps/api/event');

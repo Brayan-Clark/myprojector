@@ -2166,6 +2166,7 @@ dependencies = [
  "tauri-plugin-shell",
  "tokio",
  "warp",
+ "webkit2gtk",
 ]
 
 [[package]]

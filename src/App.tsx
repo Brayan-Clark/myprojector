@@ -29,18 +29,60 @@ function App() {
   });
   const [cameraList, setCameraList] = useState<MediaDeviceInfo[]>([]);
   const [selectedCamera, setSelectedCamera] = useState<string>("");
+  const [pdfWidth, setPdfWidth] = useState(100);
+  const [pdfHeight, setPdfHeight] = useState(100);
   const [isCameraActive, setIsCameraActive] = useState(false);
+  const [overlayColor, setOverlayColor] = useState<'black' | 'white' | null>(null);
+  const [cameraError, setCameraError] = useState<string | null>(null);
 
-  const refreshCameras = async () => {
+  const refreshCameras = async (forcePermission = false) => {
     try {
+      setCameraError(null);
+      // Step 1: Enumerate and check for labels
       const devices = await navigator.mediaDevices.enumerateDevices();
-      console.log("Devices list:", devices.map(d => ({ kind: d.kind, label: d.label, id: d.deviceId })));
-      const cams = devices.filter(d => d.kind === 'videoinput');
+      const hasLabels = devices.some(d => d.kind === 'videoinput' && d.label);
+      
+      if (forcePermission || !hasLabels) {
+        console.log("Requesting camera permission to unlock labels...");
+        try {
+          // Attempt a very basic request to trigger the system prompt
+          console.log("Triggering system permission prompt...");
+          const stream = await navigator.mediaDevices.getUserMedia({ 
+            video: { width: { ideal: 640 }, height: { ideal: 480 } } 
+          });
+          
+          await new Promise(r => setTimeout(r, 300)); 
+          stream.getTracks().forEach(t => t.stop());
+        } catch (permErr: any) {
+          console.warn("Camera permission error:", permErr.name);
+          if (permErr.name === 'NotReadableError') {
+            setCameraError("Caméra occupée (déjà utilisée).");
+          } else if (permErr.name === 'NotAllowedError') {
+            const isLinux = navigator.userAgent.toLowerCase().includes('linux');
+            setCameraError(isLinux 
+              ? "Accès refusé. (Astuce Linux: lancez avec GDK_BACKEND=x11 ou vérifiez vos permissions)"
+              : "Accès caméra refusé par le système.");
+          } else if (permErr.name === 'NotFoundError') {
+            setCameraError("Aucune caméra physique détectée.");
+          } else {
+            setCameraError(`Erreur: ${permErr.name}`);
+          }
+        }
+      }
+
+      // Step 2: Enumerate all devices again
+      const freshDevices = await navigator.mediaDevices.enumerateDevices();
+      let cams = freshDevices.filter(d => d.kind === 'videoinput');
+      
+      console.log(`Found ${cams.length} camera(s):`, cams.map(c => c.label || `ID:${c.deviceId.slice(0, 4)}`));
       setCameraList(cams);
       
       if (cams.length > 0) {
-        if (!selectedCamera || !cams.find(c => c.deviceId === selectedCamera)) {
-          setSelectedCamera(cams[0].deviceId);
+        const stillExists = cams.find(c => c.deviceId === selectedCamera);
+        if (!selectedCamera || !stillExists) {
+          const newId = cams[0].deviceId;
+          setSelectedCamera(newId);
+          import('@tauri-apps/api/event').then(({ emit }) => emit('set_camera_id', newId));
         }
       }
     } catch (e) {
@@ -53,10 +95,11 @@ function App() {
     
     // Refresh periodically if camera is active
     const interval = setInterval(() => {
-      if (isCameraActive) {
+      const hasLabels = cameraList.some(c => c.label);
+      if (isCameraActive && !hasLabels) {
         refreshCameras();
       }
-    }, 5000);
+    }, 10000);
 
     const handleDeviceChange = () => {
       console.log("Devices changed, refreshing...");
@@ -117,7 +160,37 @@ function App() {
       }
       if (e.altKey && e.key.toLowerCase() === 'h') {
         e.preventDefault();
-        setIsContentHidden(prev => !prev);
+        const next = !isContentHidden;
+        setIsContentHidden(next);
+        import('@tauri-apps/api/event').then(({ emit }) => emit('update_live_hide_content', next));
+      }
+      // Alt+N => Écran Noir
+      if (e.altKey && e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        setOverlayColor('black');
+        import('@tauri-apps/api/event').then(({ emit }) => emit('update_live_overlay', 'black'));
+      }
+      // Alt+W => Écran Blanc
+      if (e.altKey && e.key.toLowerCase() === 'w') {
+        e.preventDefault();
+        setOverlayColor('white');
+        import('@tauri-apps/api/event').then(({ emit }) => emit('update_live_overlay', 'white'));
+      }
+      // Alt+R => Réveil (retirer overlay)
+      if (e.altKey && e.key.toLowerCase() === 'r') {
+        e.preventDefault();
+        setOverlayColor(null);
+        import('@tauri-apps/api/event').then(({ emit }) => emit('update_live_overlay', null));
+      }
+      // Alt+C => Toggle Horloge
+      if (e.altKey && e.key.toLowerCase() === 'c') {
+        e.preventDefault();
+        setClockSettings((prev: any) => ({ ...prev, enabled: !prev.enabled }));
+      }
+      // Alt+M => Toggle Message défilant
+      if (e.altKey && e.key.toLowerCase() === 'm') {
+        e.preventDefault();
+        setTickerSettings((prev: any) => ({ ...prev, enabled: !prev.enabled }));
       }
     };
     window.addEventListener('keydown', handleGlobalShortcuts);
@@ -333,9 +406,14 @@ function App() {
     emit('update_live_hide_content', isContentHidden).catch(() => null);
     emit('update_live_clock', clockSettings).catch(() => null);
     emit('update_live_ticker', tickerSettings).catch(() => null);
+    emit('toggle_live_camera', isCameraActive).catch(() => null);
+    emit('set_camera_id', selectedCamera).catch(() => null);
+    emit('update_pdf_size', { width: pdfWidth, height: pdfHeight }).catch(() => null);
 
     localStorage.setItem('live_lyrics', JSON.stringify(lyricsObj));
     localStorage.setItem('live_media', JSON.stringify(mediaObj));
+    localStorage.setItem('live_camera_active', JSON.stringify(isCameraActive));
+    localStorage.setItem('live_camera_id', selectedCamera);
   };
 
   useEffect(() => {
@@ -344,7 +422,7 @@ function App() {
       sync();
     }, 50);
     return () => clearTimeout(timer);
-  }, [isLiveActive, computedLiveSettings, projectedSong, projectedVerseIdx, isBaseScreenProjected, isContentHidden, liveCategory, clockSettings, tickerSettings]);
+  }, [isLiveActive, computedLiveSettings, projectedSong, projectedVerseIdx, isBaseScreenProjected, isContentHidden, liveCategory, clockSettings, tickerSettings, isCameraActive, selectedCamera, pdfWidth, pdfHeight]);
 
   useEffect(() => {
     let unlisten: any;
@@ -520,6 +598,8 @@ function App() {
         tickerSettings={tickerSettings}
         setTickerSettings={setTickerSettings}
         refreshCameras={refreshCameras}
+        setOverlayColor={setOverlayColor}
+        cameraError={cameraError}
       />
 
       <div className="flex-1 flex min-h-0">
@@ -554,6 +634,10 @@ function App() {
             setActiveSong(updatedSong);
             setPlaylist((prev: any[]) => prev.map(item => item.id === updatedSong.id ? updatedSong : item));
           }}
+          pdfWidth={pdfWidth}
+          setPdfWidth={setPdfWidth}
+          pdfHeight={pdfHeight}
+          setPdfHeight={setPdfHeight}
         />
 
         <RightProjection
@@ -579,11 +663,12 @@ function App() {
           activeCategory={activeCategory}
           ticker={tickerSettings}
           clock={clockSettings}
-          mediaOverlay={null} 
+          mediaOverlay={null}
           isContentHidden={isContentHidden}
           isCameraActive={isCameraActive}
           selectedCamera={selectedCamera}
           currentTime={new Date()}
+          overlayColor={overlayColor}
         />
       </div>
     </div>

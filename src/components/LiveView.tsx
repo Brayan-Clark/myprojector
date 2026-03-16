@@ -1,4 +1,4 @@
-import { useEffect, useState, memo, useRef } from "react";
+import { useEffect, useState, memo, useRef, useCallback } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { FileText } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
@@ -115,7 +115,38 @@ const RenderClock = memo(({ clock, currentTime }: { clock: any, currentTime: Dat
   );
 });
 
+// Ticker avec animation JS pour compatibilité maximale AppImage/WebKit
 const RenderTicker = memo(({ ticker }: { ticker: any }) => {
+  const textRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const posX = useRef(0);
+  const animFrameRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (!ticker.enabled || !ticker.message || !textRef.current || !containerRef.current) return;
+
+    const containerWidth = window.innerWidth;
+    const textWidth = textRef.current.offsetWidth || ticker.message.length * (ticker.fontSize || 28) * 0.6;
+    const speed = 1.5; // px per frame
+    posX.current = containerWidth;
+
+    const animate = () => {
+      posX.current -= speed;
+      if (posX.current < -textWidth) {
+        posX.current = containerWidth;
+      }
+      if (textRef.current) {
+        textRef.current.style.transform = `translateX(${posX.current}px)`;
+      }
+      animFrameRef.current = requestAnimationFrame(animate);
+    };
+
+    animFrameRef.current = requestAnimationFrame(animate);
+    return () => {
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    };
+  }, [ticker.enabled, ticker.message, ticker.fontSize]);
+
   if (!ticker.enabled || !ticker.message) return null;
 
   const hexToRgba = (hex: string, opacity: number) => {
@@ -131,31 +162,22 @@ const RenderTicker = memo(({ ticker }: { ticker: any }) => {
 
   const bgColor = hexToRgba(ticker.bgColor || '#000000', ticker.bgOpacity ?? 0.7);
 
-  const calculateDuration = () => {
-    const msg = ticker.message || "";
-    const fontSize = ticker.fontSize || 28;
-    // Estimate message width (approx 0.6em per char) + screen width
-    const estimatedMsgWidth = msg.length * fontSize * 0.6;
-    const screenWidth = window.innerWidth;
-    const totalDistance = screenWidth + estimatedMsgWidth;
-    // 100 pixels per second for a very smooth and readable scroll
-    return totalDistance / 100;
-  };
-
   return (
     <div
+      ref={containerRef}
       className={`fixed left-0 right-0 ${ticker.position === 'top' ? 'top-0' : 'bottom-0'} z-[70] overflow-hidden w-full py-4 border-y border-white/10`}
       style={{ backgroundColor: bgColor, color: ticker.color || 'yellow', pointerEvents: 'none' }}
     >
       <div
-        key={ticker.message}
-        className="animate-marquee whitespace-nowrap inline-block"
+        ref={textRef}
+        className="whitespace-nowrap inline-block"
         style={{
-          animationDuration: `${calculateDuration()}s`,
           fontSize: `${ticker.fontSize || 28}px`,
           fontFamily: ticker.fontFamily || 'Inter',
           fontWeight: 'bold',
           textShadow: '2px 2px 4px rgba(0,0,0,0.8)',
+          willChange: 'transform',
+          transform: 'translateX(100vw)',
         }}
       >
         {ticker.message}
@@ -177,13 +199,17 @@ export function LiveView() {
   const [isContentHidden, setIsContentHidden] = useState<boolean>(false);
   const [overlayColor, setOverlayColor] = useState<'black' | 'white' | null>(null);
   const [textContent, setTextContent] = useState<string | null>(null);
-  const [isCameraActive, setIsCameraActive] = useState(false);
-  const [cameraDeviceId, setCameraDeviceId] = useState<string | null>(null);
+  const [isCameraActive, setIsCameraActive] = useState<boolean>(() => {
+    try { return JSON.parse(localStorage.getItem('live_camera_active') || 'false'); } catch { return false; }
+  });
+  const [cameraDeviceId, setCameraDeviceId] = useState<string | null>(() => localStorage.getItem('live_camera_id'));
   const cameraVideoRef = useRef<HTMLVideoElement>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
 
   // New features
   const [clock, setClock] = useState<any>({ enabled: false, type: 'digital', position: 'top-right', style: 'modern' });
   const [ticker, setTicker] = useState<any>({ enabled: false, message: '', position: 'bottom' });
+  const [pdfSize, setPdfSize] = useState({ width: 100, height: 100 });
   const [currentTime, setCurrentTime] = useState(new Date());
 
   useEffect(() => {
@@ -207,7 +233,7 @@ export function LiveView() {
     } catch (e) { return defaults; }
   });
 
-  const cleanUrl = (url: string) => {
+  const cleanUrl = useCallback((url: string) => {
     if (!url || url === '' || url === 'null') return undefined;
     if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('asset:') || url.startsWith('http') || url.startsWith('tauri:')) {
       return url;
@@ -222,7 +248,7 @@ export function LiveView() {
     
     const stripped = relativePath.startsWith('/') ? relativePath.slice(1) : relativePath;
     return `http://127.0.0.1:11223/fs/${encodeURIComponent(stripped).replace(/%2F/g, '/')}`;
-  };
+  }, []);
 
 
   useEffect(() => {
@@ -240,6 +266,13 @@ export function LiveView() {
           setReference(data.reference || "");
           setIsBible(data.isBible || false);
         }
+        
+        // Load initial camera state from storage since we won't get the event if it was sent before window opened
+        const storedCamActive = localStorage.getItem('live_camera_active');
+        if (storedCamActive !== null) setIsCameraActive(JSON.parse(storedCamActive));
+        const storedCamId = localStorage.getItem('live_camera_id');
+        if (storedCamId) setCameraDeviceId(storedCamId);
+
       } catch (e) { console.error(e); }
 
       // Signal that we are ready to receive data
@@ -299,7 +332,8 @@ export function LiveView() {
           if (JSON.stringify(prev) === JSON.stringify(event.payload)) return prev;
           return event.payload;
         });
-      })
+      }),
+      listen<{width: number, height: number}>("update_pdf_size", (event) => setPdfSize(event.payload))
     ];
 
     return () => {
@@ -307,44 +341,67 @@ export function LiveView() {
     };
   }, []);
 
+  // Camera management with proper cleanup
   useEffect(() => {
-    let stream: MediaStream | null = null;
+    let active = true;
     const startCam = async () => {
-      if (isCameraActive && cameraVideoRef.current) {
+      // 0. Delay for window stability on Linux
+      await new Promise(r => setTimeout(r, 500));
+      if (!active) return;
+
+      // 1. Cleanup
+      if (cameraStreamRef.current) {
+        cameraStreamRef.current.getTracks().forEach(t => t.stop());
+        cameraStreamRef.current = null;
+      }
+
+      if (!isCameraActive) {
+        if (cameraVideoRef.current) cameraVideoRef.current.srcObject = null;
+        return;
+      }
+
+      // 2. Try constraints - SIMPLIFIED for WebKitGTK stability
+      const attempts = [
+        { video: { deviceId: cameraDeviceId ? { exact: cameraDeviceId } : undefined } },
+        { video: { deviceId: cameraDeviceId ? { ideal: cameraDeviceId } : undefined } },
+        { video: true }
+      ];
+
+      console.log(`LiveView: Starting camera logic. UI state active: ${isCameraActive}, Device: ${cameraDeviceId}`);
+
+      for (const constraint of attempts) {
         try {
-          const constraints = cameraDeviceId 
-            ? { video: { deviceId: { exact: cameraDeviceId } } }
-            : { video: true };
-            
-          console.log("LiveView: Starting camera with:", constraints);
-          stream = await navigator.mediaDevices.getUserMedia(constraints);
+          // Si on a pas de deviceId, on saute les deux premières tentatives spécifiques
+          if (!cameraDeviceId && constraint.video !== true && (constraint.video as any).deviceId) continue;
+
+          console.log("LiveView: Attempting with:", JSON.stringify(constraint));
+          const stream = await navigator.mediaDevices.getUserMedia(constraint);
+          cameraStreamRef.current = stream;
+
           if (cameraVideoRef.current) {
             cameraVideoRef.current.srcObject = stream;
-            cameraVideoRef.current.play().catch(e => console.warn("Video play failed:", e));
+            try {
+              await cameraVideoRef.current.play();
+              console.log("LiveView: Stream playing:", stream.getVideoTracks()[0]?.label);
+            } catch (playErr) {
+              console.warn("LiveView: Play failed but stream obtained:", playErr);
+            }
           }
+          return; // Success!
         } catch (e: any) {
-          console.error("Live Camera Error:", e.name, e.message);
-          // Fallback to simple video:true
-          try {
-             console.log("LiveView: Fallback to basic video:true");
-             stream = await navigator.mediaDevices.getUserMedia({ video: true });
-             if (cameraVideoRef.current) {
-               cameraVideoRef.current.srcObject = stream;
-               cameraVideoRef.current.play().catch(() => {});
-             }
-          } catch (e2) {
-             console.error("Live Camera critical failure:", e2);
-             setIsCameraActive(false);
-          }
+          console.warn(`LiveView: Stream attempt failed:`, e.name, e.message);
         }
-      } else if (!isCameraActive && cameraVideoRef.current) {
-        cameraVideoRef.current.srcObject = null;
       }
+      console.error("LiveView: All camera attempts failed.");
     };
+
     startCam();
+
     return () => {
-      if (stream) {
-        stream.getTracks().forEach(t => t.stop());
+      active = false;
+      if (cameraStreamRef.current) {
+        cameraStreamRef.current.getTracks().forEach(t => t.stop());
+        cameraStreamRef.current = null;
       }
     };
   }, [isCameraActive, cameraDeviceId]);
@@ -372,8 +429,10 @@ export function LiveView() {
            fetch(urlToFetch)
             .then(r => r.blob())
             .then(blob => {
-              const bolbUrl = URL.createObjectURL(blob);
-              setPdfUrl(bolbUrl);
+              // Revoke previous blob URL
+              if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+              const blobUrl = URL.createObjectURL(blob);
+              setPdfUrl(blobUrl);
             })
             .catch(e => {
               console.error("PDF Blob error:", e);
@@ -382,19 +441,20 @@ export function LiveView() {
         }
       } else { setTextContent(null); setPdfUrl(null); }
     } else { setTextContent(null); setPdfUrl(null); }
-    
+  }, [mediaOverlay]);
+
+  // Cleanup blob URL on unmount
+  useEffect(() => {
     return () => {
       if (pdfUrl) URL.revokeObjectURL(pdfUrl);
     };
-  }, [mediaOverlay]);
-
-
+  }, []);
 
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-black flex items-center justify-center text-white select-none">
 
-      {/* Background Video or Image */}
+      {/* Background Video or Image - Z-INDEX 0 */}
       {bgImage && cleanUrl(bgImage) && (
         <div className="absolute inset-0 z-0 bg-black">
           {bgImage.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i) ? (
@@ -405,7 +465,7 @@ export function LiveView() {
               loop
               muted
               playsInline
-              style={{ width: '100vw', height: '100vh', objectFit: 'cover' }}
+              style={{ width: '100vw', height: '100vh', objectFit: 'cover', display: 'block' }}
               onError={(e) => console.error("Background Video Error:", e)}
             />
           ) : (
@@ -414,14 +474,15 @@ export function LiveView() {
         </div>
       )}
 
-      {/* Camera Feed */}
+      {/* Camera Feed - Z-INDEX 5 pour être devant le fond mais derrière le contenu */}
       {isCameraActive && (
         <video
           ref={cameraVideoRef}
           autoPlay
           playsInline
           muted
-          className="absolute inset-0 w-full h-full object-cover z-10 bg-black"
+          className="absolute inset-0 w-full h-full object-cover z-[5] bg-black"
+          style={{ display: 'block' }}
         />
       )}
 
@@ -436,7 +497,7 @@ export function LiveView() {
         {mediaOverlay && mediaOverlay.url && (
           <div className="absolute inset-0 z-40 bg-black flex items-center justify-center">
             {mediaOverlay.type === 'image' && <img src={cleanUrl(mediaOverlay.url)} className="w-full h-full object-contain" alt="Media" />}
-            {mediaOverlay.type === 'video' && <video key={mediaOverlay.url} src={cleanUrl(mediaOverlay.url)} className="w-full h-full object-contain" autoPlay controls playsInline preload="auto" />}
+            {mediaOverlay.type === 'video' && <video key={mediaOverlay.url} src={cleanUrl(mediaOverlay.url)} className="w-full h-full object-contain" autoPlay controls playsInline preload="auto" style={{ display: 'block' }} />}
             {mediaOverlay.type === 'audio' && (
               <div className="flex flex-col items-center gap-4">
                 <div className="w-32 h-32 bg-[#5865f2] rounded-full flex items-center justify-center animate-pulse">
@@ -448,42 +509,40 @@ export function LiveView() {
               </div>
             )}
             {mediaOverlay.type === 'youtube' && (
-              <iframe 
-                width="100%" height="100%" 
-                src={`https://www.youtube.com/embed/${mediaOverlay.url}?autoplay=1&mute=0`} 
-                title="YouTube Video" frameBorder="0" 
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+              <iframe
+                width="100%" height="100%"
+                src={`https://www.youtube.com/embed/${mediaOverlay.url}?autoplay=1&mute=0`}
+                title="YouTube Video" frameBorder="0"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                 allowFullScreen
               ></iframe>
             )}
             {mediaOverlay.type === 'link' && <iframe src={mediaOverlay.url} className="w-full h-full border-none bg-white" title="Web Link" />}
             {mediaOverlay.type === 'document' && (
-              <div className={`w-full h-full bg-white text-black overflow-hidden flex flex-col ${textContent ? 'items-center justify-center p-10' : ''}`}>
+              <div style={{ position: 'fixed', inset: 0, backgroundColor: 'white', display: 'grid', gridTemplateColumns: '1fr', gridTemplateRows: '1fr', zIndex: 90 }}>
                 {textContent ? (
-                   <div className="p-10 whitespace-pre-wrap font-mono text-lg text-left w-full h-full overflow-y-auto">{textContent}</div>
+                   <div style={{ gridArea: '1 / 1', overflow: 'auto', padding: '2.5rem', fontFamily: 'monospace', fontSize: '1.125rem', color: '#111', whiteSpace: 'pre-wrap' }}>{textContent}</div>
                 ) : mediaOverlay.url.match(/\.pdf(\?.*)?$/i) ? (
-                   <iframe 
-                     src={`${pdfUrl || cleanUrl(mediaOverlay.url)}#view=FitH`} 
-                     width="100%"
-                     height="100%"
-                     className="absolute inset-0 border-none bg-white"
-                     style={{ width: '100%', height: '100%' }}
-                   />
+                   <div style={{ gridArea: '1 / 1', width: '100%', height: '100%', overflow: 'auto' }}>
+                      <iframe
+                        key={pdfUrl || cleanUrl(mediaOverlay.url)}
+                        src={pdfUrl ? `${pdfUrl}#toolbar=1&view=FitH&pagemode=none` : `${cleanUrl(mediaOverlay.url)}#toolbar=1&view=FitH&pagemode=none`}
+                        style={{
+                          width: `${pdfSize.width}vw`,
+                          height: `${pdfSize.height}vh`,
+                          minWidth: '100vw',
+                          minHeight: '100vh',
+                          border: 'none',
+                        }}
+                      />
+                   </div>
                 ) : (
-                   <div className="flex flex-col items-center gap-4 p-10 text-center">
+                   <div style={{ gridArea: '1 / 1', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '1rem', padding: '2.5rem', color: '#111' }}>
                       <div className="w-16 h-16 bg-orange-100 text-orange-600 rounded-full flex items-center justify-center">
                          <FileText size={32} />
                       </div>
-                      <p className="font-bold text-gray-800">Ce type de document est projeté.</p>
-                      <p className="text-xs text-gray-500 max-w-md">Si le contenu ne s'affiche pas ici, il est recommandé d'utiliser un format PDF ou de capturer une image du document.</p>
-                      <iframe 
-                        src={`${cleanUrl(mediaOverlay.url)}#view=FitH`} 
-                        width="100%"
-                        height="100%"
-                        className="w-full h-64 border border-gray-200 rounded mt-4" 
-                        style={{ width: '100%', height: '100%' }}
-                        title="Doc fallback" 
-                      />
+                      <p style={{ fontWeight: 'bold', color: '#1f2937' }}>Ce type de document est projeté.</p>
+                      <p style={{ fontSize: '0.75rem', color: '#6b7280', maxWidth: '28rem', textAlign: 'center' }}>Si le contenu ne s'affiche pas ici, il est recommandé d'utiliser un format PDF ou de capturer une image du document.</p>
                    </div>
                 )}
               </div>
@@ -528,16 +587,6 @@ export function LiveView() {
           </div>
         </div>
       </div>
-      <style>{`
-        @keyframes marquee {
-          0% { transform: translateX(100vw); }
-          100% { transform: translateX(-100%); }
-        }
-        .animate-marquee {
-          animation: marquee linear infinite;
-          will-change: transform;
-        }
-      `}</style>
     </div>
   );
 }
