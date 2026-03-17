@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Download, RefreshCw, Trash2, ChevronRight, ChevronDown } from 'lucide-react';
+import { Download, RefreshCw, Trash2, ChevronRight, ChevronDown, X } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 
 export function Store({ onInstalled, onLoadDb }: { onInstalled: () => void, onLoadDb: any }) {
@@ -10,14 +10,16 @@ export function Store({ onInstalled, onLoadDb }: { onInstalled: () => void, onLo
   const [expandedCats, setExpandedCats] = useState<string[]>(['hymnes', 'bible']);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{ message: string; onConfirm: () => void } | null>(null);
 
   const loadStore = async () => {
     setLoading(true);
     setError(null);
     try {
-      console.log("Fetching manifests...");
-      const hymnsRes = await fetch("https://raw.githubusercontent.com/Brayan-Clark/adventools/data/hymnes/manifest.json").catch(e => { throw new Error("Erreur réseau: " + e.message); });
-      const bibleRes = await fetch("https://raw.githubusercontent.com/Brayan-Clark/adventools/data/bible/manifest.json").catch(e => { throw new Error("Erreur réseau: " + e.message); });
+      console.log("Fetching manifests with cache buster...");
+      const timestamp = Date.now();
+      const hymnsRes = await fetch(`https://raw.githubusercontent.com/Brayan-Clark/adventools/data/hymnes/manifest.json?c=${timestamp}`).catch(e => { throw new Error("Erreur réseau: " + e.message); });
+      const bibleRes = await fetch(`https://raw.githubusercontent.com/Brayan-Clark/adventools/data/bible/manifest.json?c=${timestamp}`).catch(e => { throw new Error("Erreur réseau: " + e.message); });
       
       if (!hymnsRes.ok || !bibleRes.ok) {
         throw new Error(`Erreur HTTP: ${hymnsRes.status} / ${bibleRes.status}`);
@@ -51,21 +53,34 @@ export function Store({ onInstalled, onLoadDb }: { onInstalled: () => void, onLo
     try {
       await invoke("download_db", { url: item.url, category: item.category, filename: item.file });
       await loadStore();
-      onInstalled();
+      
+      // CRITICAL: Immediately force the app to reload the data for this DB
+      // to reflect the changes downloaded from GitHub
+      await onLoadDb(item.category, item.file);
+      
+      // Show success feedback
+      alert(`Mise à jour réussie : ${item.name}`);
+      
+      // Optionnel: close store after update? Not necessarily, user might want to update others
     } catch (e) { alert("Erreur: " + e); } finally { setDownloading(null); }
   };
 
-  const handleDelete = async (e: React.MouseEvent, m: any) => {
+  const handleDelete = async (e: any, m: any) => {
      e.stopPropagation();
+     if (e.nativeEvent) e.nativeEvent.stopImmediatePropagation();
      e.preventDefault();
-     const confirmed = window.confirm(`Voulez-vous vraiment supprimer le module "${m.name}" ?`);
-     if (!confirmed) return;
      
-     try {
-        await invoke("delete_db", { category: m.category, filename: m.file });
-        await loadStore();
-        onLoadDb(m.category, ""); // Trigger reload in sidebar
-     } catch (e) { alert("Erreur: " + e); }
+     setConfirmDialog({
+       message: `Voulez-vous vraiment supprimer définitivement le module "${m.name}" du disque ?`,
+       onConfirm: async () => {
+         setConfirmDialog(null);
+         try {
+            await invoke("delete_db", { category: m.category, filename: m.file });
+            await loadStore();
+            onLoadDb(m.category, ""); // Trigger reload in sidebar
+         } catch (e) { alert("Erreur: " + e); }
+       }
+     });
   };
 
   const toggleCat = (cat: string) => {
@@ -101,9 +116,17 @@ export function Store({ onInstalled, onLoadDb }: { onInstalled: () => void, onLo
                         <>
                            <span className="text-[10px] font-bold text-green-500 bg-green-500/10 px-2 py-0.5 rounded border border-green-500/20">INSTALLÉ</span>
                            <button 
+                              className="p-1.5 hover:bg-[#5865f2]/20 text-gray-500 hover:text-[#5865f2] rounded transition opacity-0 group-hover:opacity-100" 
+                              onClick={() => handleDownload(m)}
+                              disabled={isDownloading}
+                              title="Mettre à jour depuis GitHub"
+                           >
+                              <RefreshCw size={14} className={isDownloading ? "animate-spin" : ""} />
+                           </button>
+                           <button 
                               className="p-1.5 hover:bg-red-500/20 text-gray-500 hover:text-red-400 rounded transition opacity-0 group-hover:opacity-100" 
                               onClick={(e) => handleDelete(e, m)}
-                              title="Supprimer"
+                              title="Supprimer du disque"
                            >
                               <Trash2 size={14} />
                            </button>
@@ -115,7 +138,7 @@ export function Store({ onInstalled, onLoadDb }: { onInstalled: () => void, onLo
                           disabled={isDownloading}
                         >
                            {isDownloading ? <RefreshCw size={14} className="animate-spin" /> : <Download size={14} />} 
-                           {isDownloading ? "..." : "Installer"}
+                           {isDownloading ? "Téléchargement..." : "Installer"}
                         </button>
                       )}
                    </div>
@@ -127,10 +150,55 @@ export function Store({ onInstalled, onLoadDb }: { onInstalled: () => void, onLo
   };
 
   return (
-    <div className="flex-1 overflow-y-auto bg-[#2b2d31] p-4 text-gray-200">
-      <div className="flex items-center justify-between mb-6">
+    <div className="flex-1 overflow-y-auto bg-[#2b2d31] p-4 text-gray-200 relative">
+      {confirmDialog && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+          <div className="bg-[#1e1f22] border border-[#36393f] rounded-lg shadow-2xl p-6 max-w-sm w-full animate-in fade-in zoom-in duration-200">
+            <div className="flex items-start gap-3 mb-5">
+              <div className="w-10 h-10 rounded-full bg-red-500/20 flex items-center justify-center shrink-0">
+                <Trash2 size={20} className="text-red-400" />
+              </div>
+              <div>
+                <p className="text-white font-bold text-sm mb-1">Confirmer la suppression</p>
+                <p className="text-gray-400 text-xs leading-relaxed">{confirmDialog.message}</p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                className="px-4 py-2 text-xs font-bold text-gray-300 hover:text-white bg-[#36393f] hover:bg-[#4f545c] rounded transition"
+                onClick={() => setConfirmDialog(null)}
+              >
+                Annuler
+              </button>
+              <button
+                className="px-4 py-2 text-xs font-bold text-white bg-red-600 hover:bg-red-700 rounded transition shadow-lg shadow-red-900/20"
+                onClick={confirmDialog.onConfirm}
+              >
+                Désinstaller
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between mb-8 pb-2 border-b border-[#36393f]">
         <h2 className="font-black text-xl text-[#5865f2] tracking-tighter">BIBLIOTHÈQUE</h2>
-        <button onClick={() => onInstalled()} className="text-[10px] font-bold text-gray-400 hover:text-white uppercase">Fermer</button>
+        <div className="flex items-center gap-2">
+          <button 
+            onClick={loadStore} 
+            className="p-2 hover:bg-[#36393f] text-gray-400 hover:text-white rounded-full transition"
+            title="Rafraîchir la liste"
+          >
+            <RefreshCw size={18} className={loading ? 'animate-spin' : ''} />
+          </button>
+          <button 
+            onClick={() => onInstalled()} 
+            className="p-2 hover:bg-[#36393f] text-gray-400 hover:text-red-400 rounded-full transition"
+            title="Fermer"
+          >
+            <X size={18} />
+          </button>
+        </div>
       </div>
       
       <div className="space-y-8">

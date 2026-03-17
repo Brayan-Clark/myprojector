@@ -4,6 +4,7 @@ use tauri::Manager;
 use std::path::PathBuf;
 use std::fs;
 use std::io::Write;
+use std::time::{SystemTime, UNIX_EPOCH};
 use warp::Filter;
 
 fn get_data_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -25,6 +26,13 @@ fn init_data(app: &tauri::AppHandle) -> Result<(), String> {
     let data_root = get_data_root(app)?;
     println!("Initializing data in {:?}", data_root);
     
+    // Use a flag to only copy once, so user deletions persist
+    let flag_path = data_root.join(".initialized");
+    if flag_path.exists() {
+        println!("Data already initialized. Skipping copy.");
+        return Ok(());
+    }
+
     if let Ok(res_dir) = app.path().resource_dir() {
         println!("Resources found in {:?}", res_dir);
         // Copy DBs
@@ -43,6 +51,10 @@ fn init_data(app: &tauri::AppHandle) -> Result<(), String> {
     } else {
         println!("Resource directory not found!");
     }
+
+    // Create flag file
+    let _ = fs::File::create(flag_path);
+    
     Ok(())
 }
 
@@ -260,18 +272,41 @@ fn list_dbs(app_handle: tauri::AppHandle, category: &str) -> Result<Vec<String>,
 
 #[tauri::command]
 async fn download_db(app_handle: tauri::AppHandle, url: String, category: String, filename: String) -> Result<(), String> {
+    println!("Downloading {} from {}", filename, url);
     let mut dest_path = get_data_root(&app_handle)?;
     dest_path.push("data");
     dest_path.push(category);
     fs::create_dir_all(&dest_path).map_err(|e| e.to_string())?;
     dest_path.push(&filename);
 
-    let response = reqwest::get(&url).await.map_err(|e| e.to_string())?;
+    let client = reqwest::Client::builder()
+        .user_agent("MyProjector/1.0")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // Add cache buster to URL to skip Github CDN cache
+    let cache_buster = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let final_url = if url.contains('?') {
+        format!("{}&cb={}", url, cache_buster)
+    } else {
+        format!("{}?cb={}", url, cache_buster)
+    };
+
+    let response = client.get(&final_url)
+        .header("Cache-Control", "no-cache")
+        .header("Pragma", "no-cache")
+        .send().await.map_err(|e| e.to_string())?;
+    
+    if !response.status().is_success() {
+        return Err(format!("Download failed with status: {}. URL: {}", response.status(), final_url));
+    }
+
     let bytes = response.bytes().await.map_err(|e| e.to_string())?;
 
     let mut file = fs::File::create(&dest_path).map_err(|e| e.to_string())?;
     file.write_all(&bytes).map_err(|e| e.to_string())?;
 
+    println!("Download complete: {:?}", dest_path);
     Ok(())
 }
 
