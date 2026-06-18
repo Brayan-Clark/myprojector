@@ -1,8 +1,10 @@
-import { useEffect, useState, memo, useRef, useCallback } from "react";
+import { useEffect, useState, memo, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { FileText } from "lucide-react";
+import { FileText, ChevronLeft, ChevronRight } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { cleanUrl } from "../lib/media";
+import { PdfViewer, type PdfViewerHandle } from "./PdfViewer";
 
 const RenderClock = memo(({ clock, currentTime }: { clock: any, currentTime: Date }) => {
   if (!clock.enabled) return null;
@@ -210,7 +212,76 @@ export function LiveView() {
   const [clock, setClock] = useState<any>({ enabled: false, type: 'digital', position: 'top-right', style: 'modern' });
   const [ticker, setTicker] = useState<any>({ enabled: false, message: '', position: 'bottom' });
   const [pdfSize, setPdfSize] = useState({ width: 100, height: 100 });
+  const [pdfPage, setPdfPage] = useState(1);
+  const [pdfNumPages, setPdfNumPages] = useState(0);
+  const [showPdfControls, setShowPdfControls] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
+
+  const pdfViewerRef = useRef<PdfViewerHandle>(null);
+  const lastEmittedPageRef = useRef(0);
+  const pendingPageRef = useRef(1); // page commanded by the operator, applied once loaded
+
+  // Apply the operator-commanded page once the document has finished loading.
+  const handleLivePdfLoaded = (n: number) => {
+    setPdfNumPages(n);
+    const target = pendingPageRef.current;
+    if (target > 1) requestAnimationFrame(() => pdfViewerRef.current?.goToPage(target));
+  };
+
+  const isPdfDoc = !!mediaOverlay && mediaOverlay.type === 'document' && /\.pdf(\?.*)?$/i.test(mediaOverlay.url);
+
+  // Jump to a page by smooth-scrolling the continuous view. The resulting
+  // visible-page change (onVisiblePageChange) syncs state + notifies the
+  // controller — so wheel scrolling and button/keyboard jumps share one path.
+  const goLivePage = (next: number) => {
+    pdfViewerRef.current?.goToPage(next);
+  };
+
+  // Called whenever the page centred in the scroll view changes (wheel or jump).
+  const handleLiveVisiblePage = (p: number) => {
+    setPdfPage(p);
+    if (lastEmittedPageRef.current !== p) {
+      lastEmittedPageRef.current = p;
+      import('@tauri-apps/api/event').then(({ emit }) => emit('live_pdf_page_changed', p));
+    }
+  };
+
+  // Keyboard navigation on the presentation window itself (arrows / page / space).
+  useEffect(() => {
+    if (!isPdfDoc) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (["ArrowRight", "ArrowDown", "PageDown", " ", "Enter"].includes(e.key)) {
+        e.preventDefault();
+        goLivePage(pdfPage + 1);
+      } else if (["ArrowLeft", "ArrowUp", "PageUp", "Backspace"].includes(e.key)) {
+        e.preventDefault();
+        goLivePage(pdfPage - 1);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPdfDoc, pdfPage, pdfNumPages]);
+
+  // Show the on-screen controls only while the mouse moves, then auto-hide them
+  // so the audience isn't disturbed by a persistent toolbar.
+  useEffect(() => {
+    if (!isPdfDoc) {
+      setShowPdfControls(false);
+      return;
+    }
+    let timer: any;
+    const onMove = () => {
+      setShowPdfControls(true);
+      clearTimeout(timer);
+      timer = setTimeout(() => setShowPdfControls(false), 2500);
+    };
+    window.addEventListener("mousemove", onMove);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      clearTimeout(timer);
+    };
+  }, [isPdfDoc]);
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -232,24 +303,6 @@ export function LiveView() {
       return Object.keys(parsed).length === 0 ? defaults : parsed;
     } catch (e) { return defaults; }
   });
-
-  const cleanUrl = useCallback((url: string) => {
-    if (!url || url === '' || url === 'null') return undefined;
-    if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('asset:') || url.startsWith('http') || url.startsWith('tauri:')) {
-      return url;
-    }
-    
-    const appDataPath = localStorage.getItem('appDataPath');
-    let relativePath = url;
-    
-    if (appDataPath && url.startsWith(appDataPath)) {
-      relativePath = url.replace(appDataPath, '');
-    }
-    
-    const stripped = relativePath.startsWith('/') ? relativePath.slice(1) : relativePath;
-    return `http://127.0.0.1:11223/fs/${encodeURIComponent(stripped).replace(/%2F/g, '/')}`;
-  }, []);
-
 
   useEffect(() => {
     const initWindow = async () => {
@@ -333,7 +386,13 @@ export function LiveView() {
           return event.payload;
         });
       }),
-      listen<{width: number, height: number}>("update_pdf_size", (event) => setPdfSize(event.payload))
+      listen<{width: number, height: number}>("update_pdf_size", (event) => setPdfSize(event.payload)),
+      listen<number>("command_pdf_page", (event) => {
+        // Operator asked to project a specific page → scroll the live view to it
+        // (and remember it, in case the document is still loading).
+        pendingPageRef.current = event.payload;
+        pdfViewerRef.current?.goToPage(event.payload);
+      })
     ];
 
     return () => {
@@ -493,6 +552,28 @@ export function LiveView() {
       <RenderClock clock={clock} currentTime={currentTime} />
       <RenderTicker ticker={ticker} />
 
+      {/* PDF page controls ON the presentation screen — keyboard works always,
+          these buttons appear on mouse move and auto-hide after 2.5s. */}
+      {isPdfDoc && pdfNumPages > 0 && (
+        <div
+          className={`fixed bottom-8 left-1/2 -translate-x-1/2 z-[120] flex items-center gap-4 bg-black/80 text-white rounded-full px-5 py-3 border border-white/20 shadow-2xl transition-opacity duration-300 ${showPdfControls ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+        >
+          <button
+            className="p-2 rounded-full hover:bg-white/20 disabled:opacity-30 disabled:hover:bg-transparent"
+            onClick={() => goLivePage(pdfPage - 1)}
+            disabled={pdfPage <= 1}
+            title="Page précédente (← / Page préc.)"
+          ><ChevronLeft size={28} /></button>
+          <span className="text-lg font-bold tabular-nums min-w-[80px] text-center">{pdfPage} / {pdfNumPages}</span>
+          <button
+            className="p-2 rounded-full hover:bg-white/20 disabled:opacity-30 disabled:hover:bg-transparent"
+            onClick={() => goLivePage(pdfPage + 1)}
+            disabled={pdfPage >= pdfNumPages}
+            title="Page suivante (→ / Espace / Page suiv.)"
+          ><ChevronRight size={28} /></button>
+        </div>
+      )}
+
       <div className={`absolute inset-0 w-full h-full transition-opacity duration-300 z-20 ${isContentHidden ? 'opacity-0' : 'opacity-100'}`}>
         {mediaOverlay && mediaOverlay.url && (
           <div className="absolute inset-0 z-40 bg-black flex items-center justify-center">
@@ -523,17 +604,17 @@ export function LiveView() {
                 {textContent ? (
                    <div style={{ gridArea: '1 / 1', overflow: 'auto', padding: '2.5rem', fontFamily: 'monospace', fontSize: '1.125rem', color: '#111', whiteSpace: 'pre-wrap' }}>{textContent}</div>
                 ) : mediaOverlay.url.match(/\.pdf(\?.*)?$/i) ? (
-                   <div style={{ gridArea: '1 / 1', width: '100%', height: '100%', overflow: 'auto' }}>
-                      <iframe
-                        key={pdfUrl || cleanUrl(mediaOverlay.url)}
-                        src={pdfUrl ? `${pdfUrl}#toolbar=1&view=FitH&pagemode=none` : `${cleanUrl(mediaOverlay.url)}#toolbar=1&view=FitH&pagemode=none`}
-                        style={{
-                          width: `${pdfSize.width}vw`,
-                          height: `${pdfSize.height}vh`,
-                          minWidth: '100vw',
-                          minHeight: '100vh',
-                          border: 'none',
-                        }}
+                   // Absolute (not a grid item) so it stays bounded to the viewport
+                   // and the inner scroll container can actually overflow/scroll.
+                   <div style={{ position: 'absolute', inset: 0, overflow: 'hidden' }}>
+                      <PdfViewer
+                        ref={pdfViewerRef}
+                        mode="scroll"
+                        url={pdfUrl || cleanUrl(mediaOverlay.url)}
+                        zoom={(pdfSize.width || 100) / 100}
+                        onLoaded={handleLivePdfLoaded}
+                        onVisiblePageChange={handleLiveVisiblePage}
+                        style={{ background: 'white' }}
                       />
                    </div>
                 ) : (

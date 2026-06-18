@@ -6,6 +6,7 @@ import {
   AlignVerticalJustifyCenter, AlignVerticalJustifyStart, AlignVerticalJustifyEnd,
   ChevronDown, Camera, Type, List, Clock, MessageSquare, RefreshCw, AlertCircle
 } from 'lucide-react';
+import { cleanUrl } from '../lib/media';
 
 
 
@@ -28,23 +29,6 @@ export function Toolbar({
   const fontSizes = [50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 180, 200, 250, 300];
 
   const isVideoUrl = (url: string) => url.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i);
-
-  const cleanUrl = (url: string) => {
-    if (!url || url === '' || url === 'null') return undefined;
-    if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('asset:') || url.startsWith('http') || url.startsWith('tauri:')) {
-      return url;
-    }
-    
-    const appDataPath = localStorage.getItem('appDataPath');
-    let relativePath = url;
-    
-    if (appDataPath && url.startsWith(appDataPath)) {
-      relativePath = url.replace(appDataPath, '');
-    }
-    
-    const stripped = relativePath.startsWith('/') ? relativePath.slice(1) : relativePath;
-    return `http://127.0.0.1:11223/fs/${encodeURIComponent(stripped).replace(/%2F/g, '/')}`;
-  };
 
   const defaultBgs: { name: string, url: string }[] = [
     // { name: 'Easy Worship', url: '/backgrounds/easy_worship.mp4' }

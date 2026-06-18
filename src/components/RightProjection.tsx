@@ -1,32 +1,24 @@
 import { useState, useEffect, useRef } from 'react';
-import { Star, AlertCircle, Presentation, MonitorOff, Headphones, Youtube, Globe, FileText } from 'lucide-react';
+import { Star, AlertCircle, Presentation, MonitorOff, Headphones, Youtube, Globe, FileText, Camera, ChevronLeft, ChevronRight } from 'lucide-react';
+import { cleanUrl } from '../lib/media';
+import { PdfViewer } from './PdfViewer';
 
 export function RightProjection({ 
   activeSong, projectedSong, projectedVerseIdx, bgImage, textSettings, 
-  isLiveActive, activeVerseIdx, setActiveVerseIdx, onProject, isBaseScreenProjected, 
+  isLiveActive, activeVerseIdx, setActiveVerseIdx, onProject, isBaseScreenProjected,
   setIsBaseScreenProjected, ticker, clock, isContentHidden, isCameraActive, selectedCamera, currentTime,
-  overlayColor
+  overlayColor,
+  projectedPdfPage, commandProjectedPage, projectedNumPages, setProjectedNumPages
 }: any) {
+  const isProjectedPdf = projectedSong?.type === 'document' && /\.pdf(\?.*)?$/i.test(projectedSong?.lyrics || "");
+
+  const changeProjectedPage = (next: number) => {
+    const total = projectedNumPages || 1;
+    commandProjectedPage?.(Math.min(Math.max(1, next), total));
+  };
   const [projectedLines, setProjectedLines] = useState<string[]>([]);
   const previewVideoRef = useRef<HTMLVideoElement>(null);
   const verses = activeSong?.lyrics?.split(/\n\s*\n/) || [];
-  
-  const cleanUrl = (url: string) => {
-    if (!url || url === '' || url === 'null') return undefined;
-    if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('asset:') || url.startsWith('http') || url.startsWith('tauri:')) {
-      return url;
-    }
-    
-    const appDataPath = localStorage.getItem('appDataPath');
-    let relativePath = url;
-    
-    if (appDataPath && url.startsWith(appDataPath)) {
-      relativePath = url.replace(appDataPath, '');
-    }
-    
-    const stripped = relativePath.startsWith('/') ? relativePath.slice(1) : relativePath;
-    return `http://127.0.0.1:11223/fs/${encodeURIComponent(stripped).replace(/%2F/g, '/')}`;
-  };
 
   useEffect(() => {
     if (activeSong) {
@@ -107,11 +99,13 @@ export function RightProjection({
         return;
       }
 
-      // LINUX SPECIFIC: If Live window is open, we MUST release the camera in preview
-      // because Linux (V4L2) doesn't allow shared camera access between webviews easily.
-      const isLinux = navigator.userAgent.toLowerCase().includes('linux');
-      if (isLinux && isLiveActive) {
-        console.log("RightProjection: Linux detected and Live active. Stopping preview to free camera.");
+      // When the Live window is open, the camera is already rendered there.
+      // Opening a SECOND getUserMedia stream just for the small preview doubles
+      // CPU/GPU usage and, on Linux (V4L2), most webcams can't be shared between
+      // two webviews at all. So we release the preview stream and show a light
+      // placeholder instead — the operator still sees the live feed full-size.
+      if (isLiveActive) {
+        console.log("RightProjection: Live active — preview camera released to save resources.");
         if (previewVideoRef.current) previewVideoRef.current.srcObject = null;
         return;
       }
@@ -221,9 +215,18 @@ export function RightProjection({
             )}
          </div>
 
-         {/* Camera Feed - Z-INDEX 5 (consistent with LiveView) */}
+         {/* Camera Feed - Z-INDEX 5 (consistent with LiveView).
+             While Live is open we don't open a 2nd stream (see effect above): we
+             show a lightweight badge instead so the camera is decoded only once. */}
          {isCameraActive && (
-            <video ref={previewVideoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-cover z-[5] bg-black" style={{ display: 'block' }} />
+            isLiveActive ? (
+               <div className="absolute inset-0 z-[5] bg-black flex flex-col items-center justify-center gap-1">
+                  <Camera size={16} className="text-orange-400 animate-pulse" />
+                  <span className="text-[6px] text-orange-400 font-bold uppercase tracking-widest">Caméra affichée en direct</span>
+               </div>
+            ) : (
+               <video ref={previewVideoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-cover z-[5] bg-black" style={{ display: 'block' }} />
+            )
          )}
 
          {/* Content overlay — only when projecting */}
@@ -252,11 +255,21 @@ export function RightProjection({
                         </div>
                      )}
                      {projectedSong.type === 'document' && (
-                        <div className="w-full h-full bg-white flex flex-col items-center justify-center gap-1">
-                           <FileText size={16} className="text-gray-400" />
-                           <span className="text-[5px] text-gray-500 uppercase font-bold">Document</span>
-                           <span className="text-[4px] text-gray-400 truncate max-w-[80%]">{projectedSong.title}</span>
-                        </div>
+                        isProjectedPdf ? (
+                           <PdfViewer
+                              mode="single"
+                              url={cleanUrl(projectedSong.lyrics)}
+                              page={projectedPdfPage || 1}
+                              onLoaded={setProjectedNumPages}
+                              style={{ background: 'white' }}
+                           />
+                        ) : (
+                           <div className="w-full h-full bg-white flex flex-col items-center justify-center gap-1">
+                              <FileText size={16} className="text-gray-400" />
+                              <span className="text-[5px] text-gray-500 uppercase font-bold">Document</span>
+                              <span className="text-[4px] text-gray-400 truncate max-w-[80%]">{projectedSong.title}</span>
+                           </div>
+                        )
                      )}
                   </div>
                ) : (
@@ -290,8 +303,8 @@ export function RightProjection({
          {isBaseScreenProjected && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 z-10 pointer-events-none">
                <span className="text-[8px] text-white/30 font-bold uppercase tracking-widest bg-black/40 px-2 py-1 rounded">Écran de Base</span>
-               {navigator.userAgent.toLowerCase().includes('linux') && isLiveActive && isCameraActive && (
-                 <span className="text-[6px] text-orange-400 bg-black/60 px-1 rounded">Aperçu coupé (Priorité Live sur Linux)</span>
+               {isLiveActive && isCameraActive && (
+                 <span className="text-[6px] text-orange-400 bg-black/60 px-1 rounded">Aperçu caméra affiché sur l'écran Live</span>
                )}
             </div>
          )}
@@ -330,6 +343,25 @@ export function RightProjection({
 
          {/* LIVE indicator */}
          {isLiveActive && <div className="absolute bottom-2 right-2 bg-red-600 text-white text-[8px] px-1 py-0.5 rounded font-bold animate-pulse z-40 shadow-xl border border-white/20">LIVE</div>}
+
+         {/* PDF page controls — drive the PROJECTED page (always visible, above hover overlay) */}
+         {!isBaseScreenProjected && isProjectedPdf && projectedNumPages > 0 && (
+            <div className="absolute bottom-2 left-1/2 -translate-x-1/2 z-[60] flex items-center gap-1.5 bg-black/80 text-white rounded-full px-2 py-1 shadow-2xl border border-white/20">
+               <button
+                  className="p-1 rounded-full hover:bg-white/20 disabled:opacity-30 disabled:hover:bg-transparent"
+                  onClick={() => changeProjectedPage((projectedPdfPage || 1) - 1)}
+                  disabled={(projectedPdfPage || 1) <= 1}
+                  title="Page précédente (projetée)"
+               ><ChevronLeft size={14} /></button>
+               <span className="text-[10px] font-bold tabular-nums min-w-[42px] text-center">{projectedPdfPage || 1} / {projectedNumPages}</span>
+               <button
+                  className="p-1 rounded-full hover:bg-white/20 disabled:opacity-30 disabled:hover:bg-transparent"
+                  onClick={() => changeProjectedPage((projectedPdfPage || 1) + 1)}
+                  disabled={(projectedPdfPage || 1) >= projectedNumPages}
+                  title="Page suivante (projetée)"
+               ><ChevronRight size={14} /></button>
+            </div>
+         )}
 
          {/* Hover Overlay for Base Projection Toggle */}
          {!isBaseScreenProjected && (

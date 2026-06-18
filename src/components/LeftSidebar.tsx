@@ -67,11 +67,12 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
 
   const fuse = useMemo(() => new Fuse(songs, {
     keys: ['title', 'number', 'book'],
-    threshold: 0.3
+    threshold: 0.3,
+    ignoreLocation: true // match anywhere in the title (faster + better for long titles)
   }), [songs]);
 
-  const searchResults = useMemo(() => searchTerm 
-      ? fuse.search(searchTerm).map(result => result.item)
+  const searchResults = useMemo(() => searchTerm
+      ? fuse.search(searchTerm, { limit: 200 }).map(result => result.item)
       : songs, [fuse, searchTerm, songs]);
 
   const getDbDisplayName = (db: string) => {
@@ -92,8 +93,17 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
 
 
 
-  const bibleBooks = view === 'bible' ? Array.from(new Set(songs.map((s:any) => s.book))) : [];
-  const bibleChapters = view === 'bible' && selectedBook ? songs.filter((s:any) => s.book === selectedBook) : [];
+  // Memoised so they keep a stable reference between renders — this also stops
+  // the reference-parsing effect below (which depends on bibleBooks) from
+  // re-running on every single render.
+  const bibleBooks = useMemo(
+    () => (view === 'bible' ? Array.from(new Set(songs.map((s: any) => s.book))) : []),
+    [view, songs]
+  );
+  const bibleChapters = useMemo(
+    () => (view === 'bible' && selectedBook ? songs.filter((s: any) => s.book === selectedBook) : []),
+    [view, selectedBook, songs]
+  );
 
   useEffect(() => {
     if (view === 'bible' && searchTerm.trim()) {
@@ -122,19 +132,17 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
   const handleSaveAgenda = async () => {
     try {
       const { save } = await import('@tauri-apps/plugin-dialog');
-      const { writeTextFile } = await import('@tauri-apps/plugin-fs');
       const filePath = await save({ filters: [{ name: 'Agenda JSON', extensions: ['json'] }] });
-      if (filePath) await writeTextFile(filePath, JSON.stringify(playlist, null, 2));
+      if (filePath) await invoke('save_playlist_file', { path: filePath, content: JSON.stringify(playlist, null, 2) });
     } catch (e) { console.error(e); }
   };
 
   const handleLoadAgenda = async () => {
     try {
       const { open } = await import('@tauri-apps/plugin-dialog');
-      const { readTextFile } = await import('@tauri-apps/plugin-fs');
       const filePath = await open({ filters: [{ name: 'Agenda JSON', extensions: ['json'] }], multiple: false });
       if (filePath && typeof filePath === 'string') {
-        const contents = await readTextFile(filePath);
+        const contents: string = await invoke('read_playlist_file', { path: filePath });
         const data = JSON.parse(contents);
         if (Array.isArray(data)) setPlaylist(data);
       }
@@ -457,7 +465,7 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
               <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
                 {view === 'chant' ? (
                   isLoading ? <div className="text-xs text-gray-400 text-center mt-4">Chargement...</div> : searchResults.map((song: any) => (
-                    <div key={song.id} className="px-2 py-1 rounded hover:bg-[#3f4147] cursor-pointer flex items-center gap-2 text-xs" onClick={() => onSelectSong(song, 'hymnes')}>
+                    <div key={song.id} style={{ contentVisibility: 'auto', containIntrinsicSize: '0 28px' } as any} className="px-2 py-1 rounded hover:bg-[#3f4147] cursor-pointer flex items-center gap-2 text-xs" onClick={() => onSelectSong(song, 'hymnes')}>
                       <Music size={10} className="text-gray-500" />
                       <span className="text-gray-400 w-6 font-mono">{song.number}</span>
                       <span className="text-gray-300 truncate">{song.title}</span>

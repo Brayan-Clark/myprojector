@@ -11,12 +11,10 @@
   },
   "app": {
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: asset://* http://asset.localhost https://raw.githubusercontent.com blob: data: http://127.0.0.1:11223; video-src 'self' asset: asset://* http://asset.localhost blob: data: http://127.0.0.1:11223; audio-src 'self' asset: asset://* http://asset.localhost blob: data: http://127.0.0.1:11223; connect-src 'self' ipc: http://ipc.localhost https://raw.githubusercontent.com https://*.githubusercontent.com http://127.0.0.1:11223; media-src 'self' asset: asset://* http://asset.localhost blob: data: http://127.0.0.1:11223; object-src 'self' blob:; frame-src 'self' blob:;",
+      "csp": "default-src 'self'; img-src 'self' asset: asset://* http://asset.localhost https://raw.githubusercontent.com blob: data: http://127.0.0.1:11223; video-src 'self' asset: asset://* http://asset.localhost blob: data: http://127.0.0.1:11223; audio-src 'self' asset: asset://* http://asset.localhost blob: data: http://127.0.0.1:11223; connect-src 'self' ipc: http://ipc.localhost https://raw.githubusercontent.com https://*.githubusercontent.com http://127.0.0.1:11223 blob: data:; media-src 'self' asset: asset://* http://asset.localhost blob: data: http://127.0.0.1:11223; object-src 'self' blob:; frame-src 'self' blob: https:;",
       "assetProtocol": {
-        "enable": true,
-        "scope": [
-          "**"
-        ]
+        "enable": false,
+        "scope": []
       }
     },
     "windows": [

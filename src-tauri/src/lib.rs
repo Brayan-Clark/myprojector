@@ -79,6 +79,30 @@ fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+// --- Security helpers -------------------------------------------------------
+// Reject any path component that could be used to escape the intended folder
+// (path traversal). File/db names coming from the frontend or remote manifests
+// must be plain file names, never paths.
+fn safe_component(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.contains('\0')
+    {
+        return Err(format!("Nom de fichier invalide: {}", name));
+    }
+    Ok(())
+}
+
+// Only the two known content categories are allowed as a sub-directory name.
+fn safe_category(category: &str) -> Result<(), String> {
+    match category {
+        "hymnes" | "bible" => Ok(()),
+        _ => Err(format!("Catégorie invalide: {}", category)),
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Song {
     pub id: i64,
@@ -89,8 +113,17 @@ pub struct Song {
 }
 
 #[tauri::command]
-fn fetch_hymns(app_handle: tauri::AppHandle, db_name: &str) -> Result<Vec<Song>, String> {
-    let mut db_path = get_data_root(&app_handle)?;
+async fn fetch_hymns(app_handle: tauri::AppHandle, db_name: String) -> Result<Vec<Song>, String> {
+    safe_component(&db_name)?;
+    // Offload the (potentially heavy) SQLite read to a blocking thread so the
+    // UI/IPC thread never freezes while loading a song book.
+    tauri::async_runtime::spawn_blocking(move || fetch_hymns_blocking(&app_handle, &db_name))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn fetch_hymns_blocking(app_handle: &tauri::AppHandle, db_name: &str) -> Result<Vec<Song>, String> {
+    let mut db_path = get_data_root(app_handle)?;
     db_path.push("data");
     db_path.push("hymnes");
     db_path.push(db_name);
@@ -137,8 +170,16 @@ pub struct BibleVerse {
 }
 
 #[tauri::command]
-fn fetch_bible(app_handle: tauri::AppHandle, db_name: &str) -> Result<Vec<Song>, String> {
-    let mut db_path = get_data_root(&app_handle)?;
+async fn fetch_bible(app_handle: tauri::AppHandle, db_name: String) -> Result<Vec<Song>, String> {
+    safe_component(&db_name)?;
+    // The whole Bible is ~31k verses; do this off the UI/IPC thread.
+    tauri::async_runtime::spawn_blocking(move || fetch_bible_blocking(&app_handle, &db_name))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn fetch_bible_blocking(app_handle: &tauri::AppHandle, db_name: &str) -> Result<Vec<Song>, String> {
+    let mut db_path = get_data_root(app_handle)?;
     db_path.push("data");
     db_path.push("bible");
     db_path.push(db_name);
@@ -220,6 +261,7 @@ fn update_song(
     title: String,
     content: String,
 ) -> Result<(), String> {
+    safe_component(db_name)?;
     let mut db_path = get_data_root(&app_handle)?;
     db_path.push("data");
     db_path.push(if is_bible { "bible" } else { "hymnes" });
@@ -249,6 +291,7 @@ fn update_song(
 
 #[tauri::command]
 fn list_dbs(app_handle: tauri::AppHandle, category: &str) -> Result<Vec<String>, String> {
+    safe_category(category)?;
     let mut dir_path = get_data_root(&app_handle)?;
     dir_path.push("data");
     dir_path.push(category);
@@ -273,9 +316,22 @@ fn list_dbs(app_handle: tauri::AppHandle, category: &str) -> Result<Vec<String>,
 #[tauri::command]
 async fn download_db(app_handle: tauri::AppHandle, url: String, category: String, filename: String) -> Result<(), String> {
     println!("Downloading {} from {}", filename, url);
+
+    // --- Validate inputs before touching the filesystem or the network ------
+    safe_category(&category)?;
+    safe_component(&filename)?;
+
+    // Only allow downloads from the project's GitHub raw host (no SSRF / no
+    // arbitrary file fetching through this command).
+    let parsed = reqwest::Url::parse(&url).map_err(|e| format!("URL invalide: {}", e))?;
+    let host = parsed.host_str().unwrap_or("");
+    if host != "raw.githubusercontent.com" && !host.ends_with(".githubusercontent.com") {
+        return Err(format!("Hôte non autorisé: {}", host));
+    }
+
     let mut dest_path = get_data_root(&app_handle)?;
     dest_path.push("data");
-    dest_path.push(category);
+    dest_path.push(&category);
     fs::create_dir_all(&dest_path).map_err(|e| e.to_string())?;
     dest_path.push(&filename);
 
@@ -312,6 +368,8 @@ async fn download_db(app_handle: tauri::AppHandle, url: String, category: String
 
 #[tauri::command]
 fn delete_db(app_handle: tauri::AppHandle, category: &str, filename: &str) -> Result<(), String> {
+    safe_category(category)?;
+    safe_component(filename)?;
     let mut db_path = get_data_root(&app_handle)?;
     db_path.push("data");
     db_path.push(category);
@@ -428,8 +486,37 @@ fn import_media(app_handle: tauri::AppHandle, source_path: String) -> Result<Str
 }
 
 #[tauri::command]
-fn read_text_file(path: String) -> Result<String, String> {
-    fs::read_to_string(path).map_err(|e| e.to_string())
+fn read_text_file(app_handle: tauri::AppHandle, path: String) -> Result<String, String> {
+    // Restrict reads to the application's data directory so this command can't
+    // be abused to exfiltrate arbitrary files (e.g. /etc/passwd, SSH keys).
+    let root = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let requested = fs::canonicalize(&path).map_err(|e| e.to_string())?;
+    let root_canon = fs::canonicalize(&root).unwrap_or(root);
+
+    if !requested.starts_with(&root_canon) {
+        return Err("Accès refusé: fichier hors du dossier de l'application".to_string());
+    }
+
+    fs::read_to_string(requested).map_err(|e| e.to_string())
+}
+
+// Playlist import/export. The path comes from the OS save/open dialog (an
+// explicit user gesture). We only allow .json so this can't be misused to
+// read/write arbitrary files — this replaces the broad fs plugin permissions.
+#[tauri::command]
+fn save_playlist_file(path: String, content: String) -> Result<(), String> {
+    if !path.to_lowercase().ends_with(".json") {
+        return Err("Seuls les fichiers .json sont autorisés".to_string());
+    }
+    fs::write(&path, content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn read_playlist_file(path: String) -> Result<String, String> {
+    if !path.to_lowercase().ends_with(".json") {
+        return Err("Seuls les fichiers .json sont autorisés".to_string());
+    }
+    fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -569,7 +656,9 @@ pub fn run() {
             import_media,
             delete_media,
             get_app_data_path,
-            read_text_file
+            read_text_file,
+            save_playlist_file,
+            read_playlist_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

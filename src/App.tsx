@@ -16,6 +16,8 @@ function App() {
   const [activeVerseIdx, setActiveVerseIdx] = useState<number>(-1);
   const [projectedSong, setProjectedSong] = useState<any>(null);
   const [projectedVerseIdx, setProjectedVerseIdx] = useState<number>(-1);
+  const [projectedPdfPage, setProjectedPdfPage] = useState<number>(1);
+  const [projectedNumPages, setProjectedNumPages] = useState<number>(0);
   const [isLoading, setIsLoading] = useState(false);
   const [activeCategory, setActiveCategory] = useState<string>("hymnes");
   const [isLiveActive, setIsLiveActive] = useState(false);
@@ -429,10 +431,31 @@ function App() {
     import('@tauri-apps/api/event').then(({ listen }) => {
       listen('live_ready', () => {
         sync();
+        // Make a freshly-opened presentation window scroll to the current page.
+        import('@tauri-apps/api/event').then(({ emit }) => emit('command_pdf_page', projectedPdfPage));
       }).then(u => unlisten = u);
     });
     return () => { if (unlisten) unlisten(); };
-  }, [projectedSong, projectedVerseIdx, isBaseScreenProjected, isLiveActive]);
+  }, [projectedSong, projectedVerseIdx, isBaseScreenProjected, isLiveActive, projectedPdfPage]);
+
+  // The presentation window can drive the PDF page itself (keyboard / scroll /
+  // on-screen buttons). It reports its visible page here so the controller's
+  // mirror + indicator follow — WITHOUT echoing a command back (no fight).
+  useEffect(() => {
+    let unlisten: any;
+    import('@tauri-apps/api/event').then(({ listen }) => {
+      listen<number>('live_pdf_page_changed', (e) => setProjectedPdfPage(e.payload)).then(u => unlisten = u);
+    });
+    return () => { if (unlisten) unlisten(); };
+  }, []);
+
+  // Operator-initiated page change: update state AND command the live window to
+  // scroll to that page. (Free scrolling on the live screen never comes here.)
+  const commandProjectedPage = (p: number) => {
+    const clamped = Math.max(1, projectedNumPages ? Math.min(p, projectedNumPages) : p);
+    setProjectedPdfPage(clamped);
+    import('@tauri-apps/api/event').then(({ emit }) => emit('command_pdf_page', clamped));
+  };
 
   const getEditingSettings = () => {
     if (editingScope === 'base') {
@@ -638,6 +661,16 @@ function App() {
           setPdfWidth={setPdfWidth}
           pdfHeight={pdfHeight}
           setPdfHeight={setPdfHeight}
+          onProjectPage={(page: number) => {
+            // Explicit action from the operator: project the current document at
+            // the chosen page. (Free reading/scrolling never touches the live screen.)
+            if (!activeSong) return;
+            setProjectedSong(activeSong);
+            setProjectedVerseIdx(0);
+            setIsBaseScreenProjected(false);
+            setLiveCategory(activeCategory);
+            commandProjectedPage(page);
+          }}
         />
 
         <RightProjection
@@ -657,7 +690,13 @@ function App() {
             setProjectedVerseIdx(idx);
             setIsBaseScreenProjected(false);
             setLiveCategory(activeCategory);
+            if (song?.type === 'document') commandProjectedPage(1);
+            else setProjectedPdfPage(1);
           }}
+          projectedPdfPage={projectedPdfPage}
+          commandProjectedPage={commandProjectedPage}
+          projectedNumPages={projectedNumPages}
+          setProjectedNumPages={setProjectedNumPages}
           isBaseScreenProjected={isBaseScreenProjected}
           setIsBaseScreenProjected={setIsBaseScreenProjected}
           activeCategory={activeCategory}

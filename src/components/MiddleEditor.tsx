@@ -1,12 +1,15 @@
-import { useState, useEffect, useRef, useLayoutEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { FileText, Plus, Save, Edit3, Eye } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
-export function MiddleEditor({ 
-  activeSong, onSave, pdfWidth, setPdfWidth, pdfHeight, setPdfHeight 
-}: { 
-  activeSong: any, onSave: (s:any) => void, 
+import { cleanUrl } from '../lib/media';
+import { PdfViewer } from './PdfViewer';
+export function MiddleEditor({
+  activeSong, onSave, pdfWidth, setPdfWidth, pdfHeight, setPdfHeight, onProjectPage
+}: {
+  activeSong: any, onSave: (s:any) => void,
   pdfWidth: number, setPdfWidth: (v: number) => void,
-  pdfHeight: number, setPdfHeight: (v: number) => void
+  pdfHeight: number, setPdfHeight: (v: number) => void,
+  onProjectPage: (page: number) => void
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [localTitle, setLocalTitle] = useState("");
@@ -14,8 +17,8 @@ export function MiddleEditor({
   const [isSaving, setIsSaving] = useState(false);
   const [pdfBlobUrl, setPdfBlobUrl] = useState<string | null>(null);
   const [textContent, setTextContent] = useState<string | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
+  const [numPages, setNumPages] = useState(0);
+  const [viewPage, setViewPage] = useState(1);
 
   useEffect(() => {
     if (activeSong) {
@@ -23,7 +26,9 @@ export function MiddleEditor({
       setLocalContent(activeSong.lyrics || "");
       setIsEditing(false);
       setTextContent(null);
-      
+      setNumPages(0);
+      setViewPage(1);
+
       const fileUrl = activeSong.lyrics || "";
 
       // Load PDF as blob
@@ -54,20 +59,6 @@ export function MiddleEditor({
     }
     return () => { if (pdfBlobUrl) URL.revokeObjectURL(pdfBlobUrl); };
   }, [activeSong?.id, activeSong?.lyrics]);
-
-  useLayoutEffect(() => {
-    if (!containerRef.current) return;
-    const observer = new ResizeObserver((entries) => {
-      for (let entry of entries) {
-        setContainerSize({
-          width: entry.contentRect.width,
-          height: entry.contentRect.height
-        });
-      }
-    });
-    observer.observe(containerRef.current);
-    return () => observer.disconnect();
-  }, []);
 
   const handleSave = async () => {
     if (!activeSong) return;
@@ -105,24 +96,6 @@ export function MiddleEditor({
       </div>
     );
   }
-
-  const cleanUrl = (url: string) => {
-    if (!url || url === '' || url === 'null') return undefined;
-    if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('asset:') || url.startsWith('http') || url.startsWith('tauri:')) {
-      return url;
-    }
-    
-    const appDataPath = localStorage.getItem('appDataPath');
-    let relativePath = url;
-    
-    // Si c'est un chemin absolu qui contient appDataPath, on extrait la fin
-    if (appDataPath && url.startsWith(appDataPath)) {
-      relativePath = url.replace(appDataPath, '');
-    }
-    
-    const stripped = relativePath.startsWith('/') ? relativePath.slice(1) : relativePath;
-    return `http://127.0.0.1:11223/fs/${encodeURIComponent(stripped).replace(/%2F/g, '/')}`;
-  };
 
   return (
     <div className="flex-1 flex flex-col min-w-0 bg-[#36393f]">
@@ -206,25 +179,37 @@ export function MiddleEditor({
       {(activeSong?.type === 'image' || activeSong?.type === 'video' || activeSong?.type === 'audio' || activeSong?.type === 'document') ? (
         <div className="flex-1 flex flex-col overflow-hidden relative" style={{ minHeight: 0 }}>
           {activeSong.type === 'document' ? (
-            /* ---- PDF / Texte (Structure simplifiée pour WebKitGTK) ---- */
-            <div ref={containerRef} className="absolute inset-0 bg-white overflow-hidden">
+            /* ---- PDF / Texte (rendu via PDF.js, identique en dev et build) ---- */
+            <div className="absolute inset-0 bg-white overflow-hidden">
                {textContent ? (
                  <div className="absolute inset-0 overflow-auto p-4 font-mono text-sm bg-[#18191c] text-[#d1d5db]">
                    {textContent}
                  </div>
                ) : (
-                 <div style={{ width: '100%', height: '100%', overflow: 'auto' }}>
-                    <iframe
-                       key={pdfBlobUrl || localContent}
-                       src={pdfBlobUrl ? `${pdfBlobUrl}#toolbar=1&view=FitH` : `${cleanUrl(localContent)}#view=FitH`}
-                       style={{
-                         width: containerSize.width > 0 ? `${(containerSize.width * pdfWidth) / 100}px` : '100%',
-                         height: containerSize.height > 0 ? `${(containerSize.height * pdfHeight) / 100}px` : '100%',
-                         border: 'none',
-                         display: 'block',
-                         backgroundColor: 'white'
-                       }}
+                 <div className="absolute inset-0">
+                    <PdfViewer
+                       mode="scroll"
+                       url={pdfBlobUrl || cleanUrl(localContent)}
+                       zoom={(pdfWidth || 100) / 100}
+                       onLoaded={setNumPages}
+                       onVisiblePageChange={setViewPage}
+                       style={{ background: '#3f4147' }}
                     />
+                    {numPages > 0 && (
+                       <>
+                          <div className="absolute top-2 left-1/2 -translate-x-1/2 flex items-center gap-1.5 bg-black/70 text-white rounded-full px-3 py-1 shadow-lg pointer-events-none">
+                             <FileText size={12} />
+                             <span className="text-[10px] font-bold tracking-wide">Aperçu · page {viewPage} / {numPages} — défilez pour lire</span>
+                          </div>
+                          <button
+                             className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1.5 bg-[#5865f2] hover:bg-[#4752c4] text-white rounded-full px-4 py-2 shadow-2xl text-xs font-bold transition"
+                             onClick={() => onProjectPage(viewPage)}
+                             title="Envoyer cette page sur l'écran de projection"
+                          >
+                             <Eye size={14} /> Projeter cette page ({viewPage})
+                          </button>
+                       </>
+                    )}
                  </div>
                )}
             </div>
