@@ -1,9 +1,12 @@
 use rusqlite::{Connection, Result};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::fs;
 use std::io::Write;
+use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use warp::Filter;
 
@@ -20,6 +23,297 @@ fn get_data_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         }
     }
     Ok(path)
+}
+
+// ============================================================================
+// Optimisation automatique des médias (compression)
+// ----------------------------------------------------------------------------
+// Les vidéos/fonds trop lourds (4K, haut débit, très gros fichiers) font
+// saturer le décodeur logiciel de WebKitGTK : la lecture se fige quelques
+// secondes, parfois plusieurs minutes, puis reprend. Pour garantir une
+// projection fluide, on re-transcode automatiquement avec ffmpeg (quand il est
+// disponible) tout média qui dépasse les seuils ci-dessous. La conversion se
+// fait "en place" (même nom de fichier), donc toutes les références existantes
+// (paramètres, agenda, playlists) restent valides.
+// ============================================================================
+
+const VIDEO_SIZE_LIMIT: u64 = 80 * 1024 * 1024; // 80 Mo
+const VIDEO_MAX_WIDTH: u64 = 1920;
+const VIDEO_MAX_HEIGHT: u64 = 1080;
+const VIDEO_MAX_BITRATE: u64 = 10_000_000; // 10 Mbps
+const IMAGE_SIZE_LIMIT: u64 = 6 * 1024 * 1024; // 6 Mo
+const IMAGE_MAX_WIDTH: u64 = 2560;
+const IMAGE_MAX_HEIGHT: u64 = 1440;
+
+// Fichiers en cours de traitement (évite de compresser deux fois le même).
+static COMPRESSING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn compressing_lock() -> &'static Mutex<HashSet<String>> {
+    COMPRESSING.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn file_ext(path: &Path) -> String {
+    path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase()
+}
+
+fn is_video_file(path: &Path) -> bool {
+    matches!(file_ext(path).as_str(), "mp4" | "webm" | "ogg" | "mov" | "mkv" | "avi" | "m4v")
+}
+
+fn is_image_file(path: &Path) -> bool {
+    matches!(file_ext(path).as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif")
+}
+
+fn file_size(path: &Path) -> u64 {
+    fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+fn ffmpeg_path() -> Option<PathBuf> {
+    // 1) Dans le PATH
+    if Command::new("ffmpeg").arg("-version").output().map(|o| o.status.success()).unwrap_or(false) {
+        return Some(PathBuf::from("ffmpeg"));
+    }
+    // 2) Emplacements système classiques
+    for p in ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg"] {
+        let pb = PathBuf::from(p);
+        if pb.exists() { return Some(pb); }
+    }
+    // 3) Bundlé dans l'AppImage
+    if let Ok(appdir) = std::env::var("APPDIR") {
+        let pb = PathBuf::from(format!("{}/usr/bin/ffmpeg", appdir));
+        if pb.exists() { return Some(pb); }
+    }
+    None
+}
+
+fn ffprobe_path() -> Option<PathBuf> {
+    let ff = ffmpeg_path()?;
+    if ff == PathBuf::from("ffmpeg") {
+        if Command::new("ffprobe").arg("-version").output().map(|o| o.status.success()).unwrap_or(false) {
+            return Some(PathBuf::from("ffprobe"));
+        }
+        return None;
+    }
+    let sibling = ff.parent()?.join("ffprobe");
+    if sibling.exists() { Some(sibling) } else { None }
+}
+
+/// Retourne (largeur, hauteur, bitrate vidéo) via ffprobe, si disponible.
+fn probe_video(path: &Path) -> Option<(u64, u64, u64)> {
+    let probe = ffprobe_path()?;
+    let out = Command::new(probe)
+        .args([
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height,bit_rate",
+            "-of", "default=noprint_wrappers=1",
+        ])
+        .arg(path)
+        .output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut w = 0u64;
+    let mut h = 0u64;
+    let mut br = 0u64;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("width=") { w = v.trim().parse().unwrap_or(0); }
+        else if let Some(v) = line.strip_prefix("height=") { h = v.trim().parse().unwrap_or(0); }
+        else if let Some(v) = line.strip_prefix("bit_rate=") { br = v.trim().parse().unwrap_or(0); }
+    }
+    if w > 0 && h > 0 { Some((w, h, br)) } else { None }
+}
+
+fn needs_video_compression(path: &Path) -> bool {
+    if file_size(path) > VIDEO_SIZE_LIMIT { return true; }
+    if let Some((w, h, br)) = probe_video(path) {
+        if w > VIDEO_MAX_WIDTH || h > VIDEO_MAX_HEIGHT { return true; }
+        if br > VIDEO_MAX_BITRATE { return true; }
+    }
+    false
+}
+
+fn needs_image_compression(path: &Path) -> bool {
+    if file_size(path) > IMAGE_SIZE_LIMIT { return true; }
+    if let Some((w, h, _)) = probe_video(path) {
+        if w > IMAGE_MAX_WIDTH || h > IMAGE_MAX_HEIGHT { return true; }
+    }
+    false
+}
+
+/// Re-transcode une vidéo "en place" (même nom de fichier) vers une version
+/// légère : max 1080p, H.264 CRF 26 (VP8 pour webm), audio AAC 128k.
+fn compress_video(path: &Path) -> Result<(), String> {
+    let ff = ffmpeg_path().ok_or("ffmpeg introuvable")?;
+    let ext = file_ext(path);
+    let file_name = path.file_name().and_then(|n| n.to_str()).ok_or("Nom de fichier invalide")?;
+    let tmp = path.with_file_name(format!("{}.opt.{}", file_name, ext));
+
+    let scale = "scale=1920:1080:force_original_aspect_ratio=decrease:flags=lanczos";
+    let mut cmd = Command::new(&ff);
+    cmd.arg("-hide_banner").arg("-loglevel").arg("error").arg("-y")
+        .arg("-i").arg(path)
+        .arg("-vf").arg(scale)
+        .arg("-map").arg("0:v:0")
+        .arg("-map").arg("0:a:0?");
+
+    match ext.as_str() {
+        "webm" => {
+            cmd.args(["-c:v", "libvpx", "-crf", "10", "-b:v", "0", "-deadline", "good", "-cpu-used", "4"])
+               .args(["-c:a", "libvorbis", "-b:a", "128k"]);
+        }
+        _ => {
+            cmd.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p"])
+               .args(["-c:a", "aac", "-b:a", "128k"]);
+            if ext == "mp4" || ext == "m4v" || ext == "mov" {
+                cmd.arg("-movflags").arg("+faststart");
+            }
+        }
+    }
+
+    cmd.arg(&tmp);
+    let out = cmd.output().map_err(|e| format!("ffmpeg: {}", e))?;
+    if !out.status.success() {
+        let _ = fs::remove_file(&tmp);
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("échec ffmpeg: {}", err.trim()));
+    }
+
+    // Remplace l'original par la version allégée (même chemin = références intactes)
+    fs::rename(&tmp, path).map_err(|e| format!("renommage: {}", e))?;
+    Ok(())
+}
+
+/// Redimensionne une image "en place" (max 2560x1440) et la ré-encode.
+fn compress_image(path: &Path) -> Result<(), String> {
+    let ff = ffmpeg_path().ok_or("ffmpeg introuvable")?;
+    let ext = file_ext(path);
+    if ext == "gif" { return Err("gif animé ignoré".into()); }
+    let file_name = path.file_name().and_then(|n| n.to_str()).ok_or("Nom de fichier invalide")?;
+    let tmp = path.with_file_name(format!("{}.opt.{}", file_name, ext));
+
+    let scale = "scale=2560:1440:force_original_aspect_ratio=decrease:flags=lanczos";
+    let mut cmd = Command::new(&ff);
+    cmd.arg("-hide_banner").arg("-loglevel").arg("error").arg("-y")
+        .arg("-i").arg(path)
+        .arg("-vf").arg(scale);
+
+    match ext.as_str() {
+        "png" => { cmd.args(["-compression_level", "6"]); }
+        "webp" => { cmd.args(["-quality", "82"]); }
+        _ => { cmd.args(["-q:v", "3"]); } // jpg/jpeg
+    }
+
+    cmd.arg(&tmp);
+    let out = cmd.output().map_err(|e| format!("ffmpeg: {}", e))?;
+    if !out.status.success() {
+        let _ = fs::remove_file(&tmp);
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("échec ffmpeg: {}", err.trim()));
+    }
+
+    fs::rename(&tmp, path).map_err(|e| format!("renommage: {}", e))?;
+    Ok(())
+}
+
+/// Compresse un fichier s'il est trop lourd. Retourne true si compressé.
+fn optimize_file(path: &Path) -> Result<bool, String> {
+    if !path.is_file() { return Ok(false); }
+
+    // Ignore les fichiers temporaires de compression restants
+    if path.file_name().and_then(|n| n.to_str()).map(|n| n.contains(".opt.")).unwrap_or(false) {
+        return Ok(false);
+    }
+
+    let (is_video, heavy) = if is_video_file(path) {
+        (true, needs_video_compression(path))
+    } else if is_image_file(path) {
+        (false, needs_image_compression(path))
+    } else {
+        return Ok(false);
+    };
+
+    if !heavy { return Ok(false); }
+
+    // Évite de traiter deux fois le même fichier en parallèle
+    let key = path.to_string_lossy().to_string();
+    {
+        let mut set = compressing_lock().lock().unwrap();
+        if set.contains(&key) { return Ok(false); }
+        set.insert(key.clone());
+    }
+
+    let before = file_size(path);
+    let result = if is_video { compress_video(path) } else { compress_image(path) };
+
+    {
+        let mut set = compressing_lock().lock().unwrap();
+        set.remove(&key);
+    }
+
+    match result {
+        Ok(()) => {
+            let after = file_size(path);
+            println!("Média optimisé: {:?} ({} Mo → {} Mo)", path, before / (1024 * 1024), after / (1024 * 1024));
+            Ok(true)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[derive(Serialize)]
+struct OptimizeReport {
+    scanned: usize,
+    compressed: usize,
+    skipped: usize,
+    errors: usize,
+    messages: Vec<String>,
+}
+
+fn scan_folder(folder: &Path, report: &mut OptimizeReport) {
+    let entries = match fs::read_dir(folder) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() { continue; }
+        report.scanned += 1;
+        match optimize_file(&path) {
+            Ok(true) => {
+                report.compressed += 1;
+                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                report.messages.push(format!("✅ {} optimisé", name));
+            }
+            Ok(false) => report.skipped += 1,
+            Err(e) => {
+                report.errors += 1;
+                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                report.messages.push(format!("⚠️ {} : {}", name, e));
+            }
+        }
+    }
+}
+
+/// Analyse tous les médias (fonds + agenda) et compresse ceux qui sont trop lourds.
+#[tauri::command]
+async fn optimize_all_media(app_handle: tauri::AppHandle) -> Result<OptimizeReport, String> {
+    if ffmpeg_path().is_none() {
+        return Ok(OptimizeReport {
+            scanned: 0,
+            compressed: 0,
+            skipped: 0,
+            errors: 0,
+            messages: vec!["ffmpeg introuvable : la compression automatique est désactivée. Installez ffmpeg pour activer l'optimisation des médias.".into()],
+        });
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = get_data_root(&app_handle)?;
+        let mut report = OptimizeReport { scanned: 0, compressed: 0, skipped: 0, errors: 0, messages: Vec::new() };
+        scan_folder(&root.join("backgrounds"), &mut report);
+        scan_folder(&root.join("media"), &mut report);
+        Ok(report)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn init_data(app: &tauri::AppHandle) -> Result<(), String> {
@@ -423,6 +717,18 @@ fn import_background(app_handle: tauri::AppHandle, source_path: String) -> Resul
 
     fs::copy(src, &dest_path).map_err(|e| e.to_string())?;
 
+    // Compression automatique en arrière-plan : si le fichier est trop lourd,
+    // il est remplacé "en place" par une version allégée (même chemin, donc
+    // toutes les références existantes restent valides).
+    let optimize_target = dest_path.clone();
+    std::thread::spawn(move || {
+        match optimize_file(&optimize_target) {
+            Ok(true) => println!("Fond optimisé: {:?}", optimize_target),
+            Ok(false) => println!("Fond déjà léger: {:?}", optimize_target),
+            Err(e) => eprintln!("Optimisation du fond échouée {:?}: {}", optimize_target, e),
+        }
+    });
+
     // Return the absolute path
     Ok(dest_path.to_string_lossy().to_string())
 }
@@ -481,6 +787,16 @@ fn import_media(app_handle: tauri::AppHandle, source_path: String) -> Result<Str
     dest_path.push(filename);
 
     fs::copy(src, &dest_path).map_err(|e| e.to_string())?;
+
+    // Compression automatique en arrière-plan (même logique que les fonds).
+    let optimize_target = dest_path.clone();
+    std::thread::spawn(move || {
+        match optimize_file(&optimize_target) {
+            Ok(true) => println!("Média agenda optimisé: {:?}", optimize_target),
+            Ok(false) => println!("Média agenda déjà léger: {:?}", optimize_target),
+            Err(e) => eprintln!("Optimisation du média échouée {:?}: {}", optimize_target, e),
+        }
+    });
 
     Ok(dest_path.to_string_lossy().to_string())
 }
@@ -578,13 +894,35 @@ pub fn run() {
             let _ = std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime for warp");
                 rt.block_on(async {
+                    // SECURITE: on ne laisse que les origines de l'application lire le
+                    // serveur de médias. Avant, `allow_any_origin()` exposait tout le
+                    // dossier AppData (fonds, médias, playlists, bases de données) à
+                    // n'importe quel site web ouvert sur la machine.
                     let cors = warp::cors()
-                        .allow_any_origin()
+                        .allow_origins(vec![
+                            "http://localhost:1420", // dev (vite)
+                            "http://tauri.localhost", // prod Linux/Windows
+                            "https://tauri.localhost",
+                            "tauri://localhost", // prod macOS
+                        ])
                         .allow_methods(vec!["GET", "POST", "OPTIONS"])
                         .allow_headers(vec!["Range", "Content-Type", "Accept", "Origin"]);
+
+                    // Bloque le DNS rebinding : on refuse toute requête dont l'en-tête
+                    // Host n'est pas le serveur local attendu.
+                    let host_ok = warp::header::optional::<String>("host")
+                        .and_then(|host: Option<String>| async move {
+                            match host {
+                                Some(h) if h.starts_with("127.0.0.1:11223") || h.starts_with("localhost:11223") => Ok(()),
+                                Some(_) => Err(warp::reject::reject()),
+                                None => Ok(()),
+                            }
+                        })
+                        .untuple_one();
                     
                     // On ne sert QUE le dossier AppData pour plus de stabilité
-                    let fs_route = warp::path("fs")
+                    let fs_route = host_ok
+                        .and(warp::path("fs"))
                         .and(warp::fs::dir(_app_data_path))
                         .with(cors);
                     
@@ -592,6 +930,34 @@ pub fn run() {
                     warp::serve(fs_route).run(([127, 0, 0, 1], 11223)).await;
                 });
             });
+
+            // Analyse des médias déjà en place : re-compresse en arrière-plan les
+            // fichiers trop lourds (démarrage différé pour ne pas ralentir
+            // l'ouverture de l'application).
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(15));
+                    if ffmpeg_path().is_none() {
+                        println!("Optimisation des médias: ffmpeg introuvable, ignoré.");
+                        return;
+                    }
+                    let root = match handle.path().app_data_dir() {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!("Optimisation des médias: app_data_dir: {}", e);
+                            return;
+                        }
+                    };
+                    let mut report = OptimizeReport { scanned: 0, compressed: 0, skipped: 0, errors: 0, messages: Vec::new() };
+                    scan_folder(&root.join("backgrounds"), &mut report);
+                    scan_folder(&root.join("media"), &mut report);
+                    println!(
+                        "Optimisation des médias terminée: {} analysés, {} compressés, {} déjà légers, {} erreurs",
+                        report.scanned, report.compressed, report.skipped, report.errors
+                    );
+                });
+            }
             
             Ok(())
         })
@@ -655,6 +1021,7 @@ pub fn run() {
             delete_background,
             import_media,
             delete_media,
+            optimize_all_media,
             get_app_data_path,
             read_text_file,
             save_playlist_file,

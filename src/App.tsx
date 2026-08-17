@@ -656,6 +656,9 @@ function App() {
           onSave={(updatedSong: any) => {
             setActiveSong(updatedSong);
             setPlaylist((prev: any[]) => prev.map(item => item.id === updatedSong.id ? updatedSong : item));
+            // Rafraîchit aussi la liste source, sinon l'ancien titre/texte
+            // réapparaît quand on re-sélectionne le chant depuis la sidebar.
+            setSongs((prev: any[]) => prev.map(s => (s.id === updatedSong.id && s.book === updatedSong.book) ? updatedSong : s));
           }}
           pdfWidth={pdfWidth}
           setPdfWidth={setPdfWidth}

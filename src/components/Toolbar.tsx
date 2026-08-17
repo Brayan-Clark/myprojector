@@ -4,7 +4,7 @@ import {
   MonitorOff, Play, Image, Video, Plus, StopCircle,
   Settings2, Trash2, EyeOff, Eye, Presentation,
   AlignVerticalJustifyCenter, AlignVerticalJustifyStart, AlignVerticalJustifyEnd,
-  ChevronDown, Camera, Type, List, Clock, MessageSquare, RefreshCw, AlertCircle
+  ChevronDown, Camera, Type, List, Clock, MessageSquare, RefreshCw, AlertCircle, Zap
 } from 'lucide-react';
 import { cleanUrl } from '../lib/media';
 
@@ -25,6 +25,29 @@ export function Toolbar({
   const [activeMediaMenu, setActiveMediaMenu] = useState<'image' | 'video' | 'clock' | 'ticker' | null>(null);
   const [showFontDropdown, setShowFontDropdown] = useState(false);
   const [customBgs, setCustomBgs] = useState<string[]>([]); // Stores absolute paths
+  const [optimizing, setOptimizing] = useState(false);
+  const [optimizeMsg, setOptimizeMsg] = useState<string | null>(null);
+
+  // Analyse et compresse automatiquement les médias trop lourds (fonds vidéo,
+  // images) pour éviter les gels de lecture sur l'écran de présentation.
+  const handleOptimizeMedia = async () => {
+    setOptimizing(true);
+    setOptimizeMsg(null);
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const report: any = await invoke('optimize_all_media');
+      const details = report.messages?.length > 0
+        ? ` · ${report.compressed} optimisé(s), ${report.skipped} déjà léger(s), ${report.errors} erreur(s)`
+        : '';
+      setOptimizeMsg(`Analyse terminée${details}`);
+      loadBackgrounds(); // rafraîchit les vignettes après remplacement des fichiers
+    } catch (e) {
+      setOptimizeMsg('Erreur : ' + e);
+    } finally {
+      setOptimizing(false);
+      setTimeout(() => setOptimizeMsg(null), 8000);
+    }
+  };
 
   const fontSizes = [50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 180, 200, 250, 300];
 
@@ -257,6 +280,22 @@ export function Toolbar({
                     </div>
                   ))}
                 </div>
+              </div>
+            )}
+          </div>
+          <div className="relative">
+            <button
+              className={`flex items-center gap-1.5 px-3 py-1.5 hover:bg-[#3f4147] rounded text-gray-300 transition text-xs font-semibold ${optimizing ? 'text-[#5865f2]' : ''}`}
+              onClick={handleOptimizeMedia}
+              disabled={optimizing}
+              title="Analyser et compresser automatiquement les médias trop lourds (fonds vidéo, images) pour des performances fluides"
+            >
+              <Zap size={14} className={optimizing ? 'animate-pulse' : ''} />
+              {optimizing ? 'Optimisation...' : 'Optimiser'}
+            </button>
+            {optimizeMsg && (
+              <div className="absolute top-full left-0 mt-2 bg-[#2b2d31] border border-[#1e1f22] shadow-2xl rounded p-2 z-50 w-80 text-[10px] text-gray-300 whitespace-pre-wrap">
+                {optimizeMsg}
               </div>
             )}
           </div>

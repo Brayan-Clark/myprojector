@@ -30,6 +30,8 @@ export const BackgroundVideo = memo(({ src, muted = true, opacity = 1 }: { src: 
       crossOrigin="anonymous"
       className="w-full h-full object-cover"
       style={{ opacity }}
+      /* WebKitGTK ignores the autoPlay attribute: force playback once the first frame is ready */
+      onCanPlay={(e) => e.currentTarget.play().catch(() => {})}
     />
   );
 });

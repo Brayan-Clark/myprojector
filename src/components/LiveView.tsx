@@ -524,7 +524,10 @@ export function LiveView() {
               loop
               muted
               playsInline
+              preload="auto"
               style={{ width: '100vw', height: '100vh', objectFit: 'cover', display: 'block' }}
+              /* WebKitGTK ignores the autoPlay attribute: force playback once the first frame is ready */
+              onCanPlay={(e) => e.currentTarget.play().catch(() => {})}
               onError={(e) => console.error("Background Video Error:", e)}
             />
           ) : (
@@ -578,7 +581,22 @@ export function LiveView() {
         {mediaOverlay && mediaOverlay.url && (
           <div className="absolute inset-0 z-40 bg-black flex items-center justify-center">
             {mediaOverlay.type === 'image' && <img src={cleanUrl(mediaOverlay.url)} className="w-full h-full object-contain" alt="Media" />}
-            {mediaOverlay.type === 'video' && <video key={mediaOverlay.url} src={cleanUrl(mediaOverlay.url)} className="w-full h-full object-contain" autoPlay controls playsInline preload="auto" style={{ display: 'block' }} />}
+            {mediaOverlay.type === 'video' && (
+              <video
+                key={mediaOverlay.url}
+                src={cleanUrl(mediaOverlay.url)}
+                className="w-full h-full object-contain"
+                autoPlay
+                controls
+                playsInline
+                preload="auto"
+                style={{ display: 'block' }}
+                /* Video projetée depuis l'agenda → contrôles visibles (pause, son, avance).
+                   WebKitGTK ignore autoPlay, donc on force la lecture une fois prête. */
+                onCanPlay={(e) => e.currentTarget.play().catch(() => {})}
+                onError={(e) => console.error("Projected Video Error:", e)}
+              />
+            )}
             {mediaOverlay.type === 'audio' && (
               <div className="flex flex-col items-center gap-4">
                 <div className="w-32 h-32 bg-[#5865f2] rounded-full flex items-center justify-center animate-pulse">
@@ -586,7 +604,7 @@ export function LiveView() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
                   </svg>
                 </div>
-                <audio key={mediaOverlay.url} src={cleanUrl(mediaOverlay.url)} autoPlay controls className="opacity-50 hover:opacity-100 transition" />
+                <audio key={mediaOverlay.url} src={cleanUrl(mediaOverlay.url)} autoPlay controls className="opacity-90 hover:opacity-100 transition w-72 max-w-full" />
               </div>
             )}
             {mediaOverlay.type === 'youtube' && (

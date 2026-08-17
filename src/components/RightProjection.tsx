@@ -207,7 +207,7 @@ export function RightProjection({
          {/* Background — always visible (same as LiveView) */}
          <div className="absolute inset-0 z-0">
             {bgImage?.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i) ? (
-               <video key={bgImage} src={cleanUrl(bgImage)} autoPlay loop muted playsInline className="w-full h-full object-cover" style={{ display: 'block' }} />
+               <video key={bgImage} src={cleanUrl(bgImage)} autoPlay loop muted playsInline preload="auto" className="w-full h-full object-cover" style={{ display: 'block' }} onCanPlay={(e) => e.currentTarget.play().catch(() => {})} />
             ) : bgImage ? (
                <img src={cleanUrl(bgImage)} className="w-full h-full object-cover" alt="Background" />
             ) : (
@@ -235,7 +235,7 @@ export function RightProjection({
                {['image', 'video', 'document', 'audio', 'youtube', 'link'].includes(projectedSong.type) ? (
                   <div className="w-full h-full flex items-center justify-center z-20 absolute inset-0 bg-black">
                      {projectedSong.type === 'image' && <img src={cleanUrl(projectedSong.lyrics)} className="w-full h-full object-contain" alt="Media" />}
-                     {projectedSong.type === 'video' && <video key={projectedSong.lyrics} src={cleanUrl(projectedSong.lyrics)} className="w-full h-full object-contain" autoPlay muted playsInline preload="auto" style={{ display: 'block' }} />}
+                     {projectedSong.type === 'video' && <video key={projectedSong.lyrics} src={cleanUrl(projectedSong.lyrics)} className="w-full h-full object-contain" autoPlay muted playsInline preload="auto" style={{ display: 'block' }} onCanPlay={(e) => e.currentTarget.play().catch(() => {})} />}
                      {projectedSong.type === 'audio' && (
                        <div className="flex flex-col items-center gap-1">
                           <Headphones size={16} className="text-green-400 animate-pulse" />
