@@ -5,6 +5,9 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { cleanUrl } from "../lib/media";
 import { PdfViewer, type PdfViewerHandle } from "./PdfViewer";
+import { BackgroundVideo } from "./BackgroundVideo";
+import { ProjectedVideo } from "./ProjectedVideo";
+import { MarkdownView } from "./MarkdownView";
 
 const RenderClock = memo(({ clock, currentTime }: { clock: any, currentTime: Date }) => {
   if (!clock.enabled) return null;
@@ -284,9 +287,14 @@ export function LiveView() {
   }, [isPdfDoc]);
 
   useEffect(() => {
+    // L'horloge n'est affichée que si elle est activée : sans ce garde, ce timer
+    // forçait un re-render COMPLET de la vue projetée chaque seconde (PDF,
+    // vidéo, bandeau inclus) même quand aucune horloge n'était visible.
+    if (!clock?.enabled) return;
+    setCurrentTime(new Date());
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [clock?.enabled]);
 
   const [textSettings, setTextSettings] = useState<any>(() => {
     const saved = localStorage.getItem('live_style');
@@ -489,9 +497,13 @@ export function LiveView() {
             .then(r => r.blob())
             .then(blob => {
               // Revoke previous blob URL
-              if (pdfUrl) URL.revokeObjectURL(pdfUrl);
               const blobUrl = URL.createObjectURL(blob);
-              setPdfUrl(blobUrl);
+              // setState fonctionnel : `pdfUrl` capturé dans la closure pouvait
+              // être périmé et on fuyait alors le blob précédent (mémoire).
+              setPdfUrl((prev: string | null) => {
+                if (prev) URL.revokeObjectURL(prev);
+                return blobUrl;
+              });
             })
             .catch(e => {
               console.error("PDF Blob error:", e);
@@ -500,12 +512,21 @@ export function LiveView() {
         }
       } else { setTextContent(null); setPdfUrl(null); }
     } else { setTextContent(null); setPdfUrl(null); }
-  }, [mediaOverlay]);
+    // On dépend des VALEURS, pas de l'objet : `sync()` ré-émet un objet neuf à
+    // chaque changement (verset, horloge, bandeau...). Avec [mediaOverlay] le
+    // PDF projeté était retéléchargé en entier à chaque fois -> gel de plusieurs
+    // secondes en pleine présentation.
+  }, [mediaOverlay?.type, mediaOverlay?.url]);
 
-  // Cleanup blob URL on unmount
+  // Cleanup blob URL on unmount.
+  // Les deps sont vides (on ne veut nettoyer qu'au démontage) : il faut donc
+  // lire la valeur via une ref, sinon `pdfUrl` reste figé à null et le blob
+  // du PDF (plusieurs Mo) n'est jamais libéré.
+  const pdfUrlRef = useRef<string | null>(null);
+  useEffect(() => { pdfUrlRef.current = pdfUrl; }, [pdfUrl]);
   useEffect(() => {
     return () => {
-      if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+      if (pdfUrlRef.current) URL.revokeObjectURL(pdfUrlRef.current);
     };
   }, []);
 
@@ -517,18 +538,11 @@ export function LiveView() {
       {bgImage && cleanUrl(bgImage) && (
         <div className="absolute inset-0 z-0 bg-black">
           {bgImage.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i) ? (
-            <video
-              key={bgImage}
-              src={cleanUrl(bgImage)}
-              autoPlay
-              loop
-              muted
-              playsInline
-              preload="auto"
-              style={{ width: '100vw', height: '100vh', objectFit: 'cover', display: 'block' }}
-              /* WebKitGTK ignores the autoPlay attribute: force playback once the first frame is ready */
-              onCanPlay={(e) => e.currentTarget.play().catch(() => {})}
-              onError={(e) => console.error("Background Video Error:", e)}
+            <BackgroundVideo
+              src={cleanUrl(bgImage)!}
+              label="Fond LiveView"
+              className=""
+              style={{ width: '100vw', height: '100vh', objectFit: 'cover' }}
             />
           ) : (
             <img src={cleanUrl(bgImage)} className="w-full h-full object-cover" alt="BG" />
@@ -580,22 +594,16 @@ export function LiveView() {
       <div className={`absolute inset-0 w-full h-full transition-opacity duration-300 z-20 ${isContentHidden ? 'opacity-0' : 'opacity-100'}`}>
         {mediaOverlay && mediaOverlay.url && (
           <div className="absolute inset-0 z-40 bg-black flex items-center justify-center">
+            {mediaOverlay.type === 'markdown' && (
+              /* Diapo Markdown : rendu complet (titres, tableaux, maths, médias).
+                 Le fond noir de l'overlay est conservé pour rester lisible. */
+              <div className="h-full w-full overflow-y-auto px-[6vw] py-[4vh] text-white">
+                <MarkdownView content={mediaOverlay.url} variant="projection" />
+              </div>
+            )}
             {mediaOverlay.type === 'image' && <img src={cleanUrl(mediaOverlay.url)} className="w-full h-full object-contain" alt="Media" />}
             {mediaOverlay.type === 'video' && (
-              <video
-                key={mediaOverlay.url}
-                src={cleanUrl(mediaOverlay.url)}
-                className="w-full h-full object-contain"
-                autoPlay
-                controls
-                playsInline
-                preload="auto"
-                style={{ display: 'block' }}
-                /* Video projetée depuis l'agenda → contrôles visibles (pause, son, avance).
-                   WebKitGTK ignore autoPlay, donc on force la lecture une fois prête. */
-                onCanPlay={(e) => e.currentTarget.play().catch(() => {})}
-                onError={(e) => console.error("Projected Video Error:", e)}
-              />
+              <ProjectedVideo src={cleanUrl(mediaOverlay.url)!} label="Vidéo projetée" />
             )}
             {mediaOverlay.type === 'audio' && (
               <div className="flex flex-col items-center gap-4">

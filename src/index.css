@@ -48,3 +48,79 @@ embed, object, iframe {
   height: 100%;
   display: block;
 }
+
+/* ---------------------------------------------------------------------------
+   Rendu Markdown (agenda de type « markdown »)
+   Tailwind remet à zéro les styles par défaut : on redonne donc au contenu
+   généré une typographie lisible, aussi bien dans l'éditeur qu'à la projection
+   (où les tailles sont exprimées en `em` pour suivre la mise à l'échelle).
+--------------------------------------------------------------------------- */
+.markdown-body > *:first-child { margin-top: 0; }
+.markdown-body > *:last-child { margin-bottom: 0; }
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  font-weight: 800;
+  line-height: 1.2;
+  margin: 0.8em 0 0.4em;
+}
+.markdown-body h1 { font-size: 1.9em; }
+.markdown-body h2 { font-size: 1.5em; }
+.markdown-body h3 { font-size: 1.25em; }
+.markdown-body h4 { font-size: 1.1em; }
+
+.markdown-body p { margin: 0.6em 0; }
+.markdown-body strong { font-weight: 700; }
+.markdown-body em { font-style: italic; }
+.markdown-body del { text-decoration: line-through; opacity: 0.7; }
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0.6em 0;
+  padding-left: 1.6em;
+}
+.markdown-body ul { list-style: disc; }
+.markdown-body ol { list-style: decimal; }
+.markdown-body li { margin: 0.25em 0; }
+.markdown-body li::marker { opacity: 0.6; }
+.markdown-body input[type="checkbox"] { margin-right: 0.4em; }
+
+.markdown-body blockquote {
+  margin: 0.8em 0;
+  padding: 0.2em 0 0.2em 1em;
+  border-left: 0.2em solid #5865f2;
+  opacity: 0.9;
+  font-style: italic;
+}
+
+.markdown-body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 0.1em 0.35em;
+  border-radius: 0.25em;
+}
+.markdown-body pre {
+  margin: 0.8em 0;
+  padding: 0.8em 1em;
+  overflow-x: auto;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 0.4em;
+}
+.markdown-body pre code { background: none; padding: 0; }
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  padding: 0.4em 0.7em;
+  text-align: left;
+}
+.markdown-body th { background: rgba(255, 255, 255, 0.07); font-weight: 700; }
+
+.markdown-body hr {
+  margin: 1em 0;
+  border: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.2);
+}

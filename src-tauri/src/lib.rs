@@ -68,6 +68,28 @@ fn file_size(path: &Path) -> u64 {
     fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
+/// Nombre de threads laissés à ffmpeg : au plus la moitié des coeurs, jamais 0.
+/// L'autre moitié reste disponible pour le décodage vidéo de WebKitGTK, sinon
+/// la projection se fige pendant toute la durée de la compression.
+fn encoder_threads() -> usize {
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+    std::cmp::max(1, cores / 2)
+}
+
+/// Construit une commande ffmpeg/ffprobe qui ne peut pas voler le CPU à la
+/// projection : priorité minimale (nice 19) quand `nice` est disponible.
+fn low_priority_command(program: &Path) -> Command {
+    #[cfg(unix)]
+    {
+        if Path::new("/usr/bin/nice").exists() {
+            let mut cmd = Command::new("/usr/bin/nice");
+            cmd.arg("-n").arg("19").arg(program);
+            return cmd;
+        }
+    }
+    Command::new(program)
+}
+
 fn ffmpeg_path() -> Option<PathBuf> {
     // 1) Dans le PATH
     if Command::new("ffmpeg").arg("-version").output().map(|o| o.status.success()).unwrap_or(false) {
@@ -101,7 +123,7 @@ fn ffprobe_path() -> Option<PathBuf> {
 /// Retourne (largeur, hauteur, bitrate vidéo) via ffprobe, si disponible.
 fn probe_video(path: &Path) -> Option<(u64, u64, u64)> {
     let probe = ffprobe_path()?;
-    let out = Command::new(probe)
+    let out = low_priority_command(&probe)
         .args([
             "-v", "error",
             "-select_streams", "v:0",
@@ -148,8 +170,9 @@ fn compress_video(path: &Path) -> Result<(), String> {
     let tmp = path.with_file_name(format!("{}.opt.{}", file_name, ext));
 
     let scale = "scale=1920:1080:force_original_aspect_ratio=decrease:flags=lanczos";
-    let mut cmd = Command::new(&ff);
+    let mut cmd = low_priority_command(&ff);
     cmd.arg("-hide_banner").arg("-loglevel").arg("error").arg("-y")
+        .arg("-threads").arg(encoder_threads().to_string())
         .arg("-i").arg(path)
         .arg("-vf").arg(scale)
         .arg("-map").arg("0:v:0")
@@ -191,7 +214,7 @@ fn compress_image(path: &Path) -> Result<(), String> {
     let tmp = path.with_file_name(format!("{}.opt.{}", file_name, ext));
 
     let scale = "scale=2560:1440:force_original_aspect_ratio=decrease:flags=lanczos";
-    let mut cmd = Command::new(&ff);
+    let mut cmd = low_priority_command(&ff);
     cmd.arg("-hide_banner").arg("-loglevel").arg("error").arg("-y")
         .arg("-i").arg(path)
         .arg("-vf").arg(scale);
@@ -268,7 +291,10 @@ struct OptimizeReport {
     messages: Vec<String>,
 }
 
-fn scan_folder(folder: &Path, report: &mut OptimizeReport) {
+/// `hold` est consulté avant CHAQUE fichier : tant qu'il renvoie true on attend.
+/// Cela permet de suspendre la compression dès qu'une projection démarre, même
+/// si le scan avait déjà commencé.
+fn scan_folder(folder: &Path, report: &mut OptimizeReport, hold: &dyn Fn() -> bool) {
     let entries = match fs::read_dir(folder) {
         Ok(e) => e,
         Err(_) => return,
@@ -276,6 +302,9 @@ fn scan_folder(folder: &Path, report: &mut OptimizeReport) {
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() { continue; }
+        while hold() {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
         report.scanned += 1;
         match optimize_file(&path) {
             Ok(true) => {
@@ -308,8 +337,9 @@ async fn optimize_all_media(app_handle: tauri::AppHandle) -> Result<OptimizeRepo
     tauri::async_runtime::spawn_blocking(move || {
         let root = get_data_root(&app_handle)?;
         let mut report = OptimizeReport { scanned: 0, compressed: 0, skipped: 0, errors: 0, messages: Vec::new() };
-        scan_folder(&root.join("backgrounds"), &mut report);
-        scan_folder(&root.join("media"), &mut report);
+        // Déclenché manuellement par l'utilisateur : on ne suspend pas.
+        scan_folder(&root.join("backgrounds"), &mut report, &|| false);
+        scan_folder(&root.join("media"), &mut report, &|| false);
         Ok(report)
     })
     .await
@@ -404,6 +434,27 @@ pub struct Song {
     pub title: String,
     pub lyrics: String,
     pub book: String,
+    /// Identifiant de la collection audio associée au cantique (colonne
+    /// `c_playbacks`, ex: "fihirana-adventista"). La piste elle-même se
+    /// retrouve par `number`, qui correspond au `c_num` du playback.
+    /// `None` pour la Bible et pour les recueils sans cette colonne.
+    #[serde(default)]
+    pub playback: Option<String>,
+    /// Abréviation du livre biblique (`books.short_name`, ex: "1jao").
+    /// Indispensable pour retrouver "1Jao 3:16" : le `long_name` s'écrit
+    /// "1 Jaona", avec une espace que personne ne tape dans une référence.
+    #[serde(default)]
+    pub abbr: Option<String>,
+    /// Rang du livre biblique (1 = Genèse … 66 = Apocalypse).
+    /// C'est CE rang, et non `books.book_number`, qui indexe la carte audio :
+    /// la numérotation MyBible (10…730) saute des valeurs réservées aux
+    /// deutérocanoniques, la carte non.
+    #[serde(default)]
+    pub book_index: Option<i32>,
+    /// Fichier de la version biblique chargée (ex: "MG65.SQLite3"), pour ne
+    /// proposer l'audio malgache qu'avec le texte qui lui correspond.
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 #[tauri::command]
@@ -429,19 +480,37 @@ fn fetch_hymns_blocking(app_handle: &tauri::AppHandle, db_name: &str) -> Result<
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
 
     // table: adventiste_cantique
-    // fields: id, c_num, c_title, c_content
-    let mut stmt = conn
-        .prepare("SELECT id, c_num, c_title, c_content FROM adventiste_cantique")
-        .map_err(|e| e.to_string())?;
+    // fields: id, c_num, c_title, c_content, (c_playbacks)
+    //
+    // `c_playbacks` relie le cantique à sa collection audio, mais tous les
+    // recueils ne l'ont pas : on vérifie sa présence avant de la demander,
+    // sinon SQLite renvoie une erreur et le recueil entier ne se charge plus.
+    let has_playbacks = conn
+        .prepare("SELECT * FROM adventiste_cantique LIMIT 0")
+        .map(|st| st.column_names().iter().any(|c| *c == "c_playbacks"))
+        .unwrap_or(false);
+
+    let sql = if has_playbacks {
+        "SELECT id, c_num, c_title, c_content, c_playbacks FROM adventiste_cantique"
+    } else {
+        "SELECT id, c_num, c_title, c_content, NULL FROM adventiste_cantique"
+    };
+
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
     let song_iter = stmt
         .query_map([], |row| {
             let num: i32 = row.get(1)?;
+            let playback: Option<String> = row.get(4).unwrap_or(None);
             Ok(Song {
                 id: row.get(0)?,
                 number: num.to_string(),
                 title: row.get(2)?,
                 lyrics: row.get(3)?,
                 book: db_name.replace(".db", ""), // default book from db name
+                playback: playback.filter(|p| !p.trim().is_empty()),
+                abbr: None,
+                book_index: None,
+                version: None,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -490,7 +559,7 @@ fn fetch_bible_blocking(app_handle: &tauri::AppHandle, db_name: &str) -> Result<
     let mut stmt = conn
         .prepare(
             "
-        SELECT b.long_name, v.chapter, v.verse, v.text 
+        SELECT b.long_name, v.chapter, v.verse, v.text, b.short_name
         FROM verses v
         JOIN books b ON v.book_number = b.book_number
         ORDER BY v.book_number, v.chapter, v.verse
@@ -499,6 +568,9 @@ fn fetch_bible_blocking(app_handle: &tauri::AppHandle, db_name: &str) -> Result<
         .map_err(|e| e.to_string())?;
 
     let mut current_book = String::new();
+    let mut current_abbr: Option<String> = None;
+    // Rang du livre en cours (1..66), incrémenté à chaque changement de livre.
+    let mut current_index: i32 = 0;
     let mut current_chapter = 0;
     let mut current_title = String::new();
     let mut current_content = String::new();
@@ -509,6 +581,7 @@ fn fetch_bible_blocking(app_handle: &tauri::AppHandle, db_name: &str) -> Result<
 
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
         let book_name: String = row.get(0).map_err(|e| e.to_string())?;
+        let book_abbr: Option<String> = row.get(4).unwrap_or(None);
         let chapter: i32 = row.get(1).map_err(|e| e.to_string())?;
         let verse: i32 = row.get(2).map_err(|e| e.to_string())?;
         let text: String = row.get(3).map_err(|e| e.to_string())?;
@@ -522,11 +595,19 @@ fn fetch_bible_blocking(app_handle: &tauri::AppHandle, db_name: &str) -> Result<
                     title: current_title.clone(),
                     lyrics: current_content.clone(),
                     book: current_book.clone(),
+                    playback: None, // pas d'audio associé pour la Bible
+                    abbr: current_abbr.clone(),
+                    book_index: Some(current_index),
+                    version: Some(db_name.to_string()),
                 });
                 current_id += 1;
             }
             current_title = title;
+            if current_book != book_name {
+                current_index += 1;
+            }
             current_book = book_name;
+            current_abbr = book_abbr;
             current_chapter = chapter;
             current_content = format!("{}\n{}", verse, text);
         } else {
@@ -540,6 +621,10 @@ fn fetch_bible_blocking(app_handle: &tauri::AppHandle, db_name: &str) -> Result<
             title: current_title,
             lyrics: current_content,
             book: current_book,
+            playback: None,
+            abbr: current_abbr,
+            book_index: Some(current_index),
+            version: Some(db_name.to_string()),
         });
     }
 
@@ -658,6 +743,912 @@ async fn download_db(app_handle: tauri::AppHandle, url: String, category: String
 
     println!("Download complete: {:?}", dest_path);
     Ok(())
+}
+
+// ============================================================================
+// Bibliothèque : contenus téléchargeables à la carte (documents PDF, Mofon'aina)
+// ----------------------------------------------------------------------------
+// Rien n'est téléchargé sans action de l'utilisateur. Les fichiers atterrissent
+// dans <appdata>/data/<kind>/, donc le serveur warp les sert déjà sur
+// http://127.0.0.1:11223/fs/data/<kind>/<fichier> (voir cleanUrl côté React).
+// ============================================================================
+
+/// Dossier des écoutes en ligne, séparé des vrais téléchargements.
+const AUDIO_CACHE_DIR: &str = "_cache";
+
+/// Sous-dossiers autorisés pour la bibliothèque téléchargeable.
+fn safe_library_kind(kind: &str) -> Result<(), String> {
+    match kind {
+        "docs" | "mofonaina" | "audio" => Ok(()),
+        _ => Err(format!("Type de contenu invalide: {}", kind)),
+    }
+}
+
+/// Un identifiant de collection (ex: "fihirana-adventista") sert de sous-dossier :
+/// on n'accepte donc que des slugs, jamais de séparateur de chemin.
+fn safe_slug(slug: &str) -> Result<(), String> {
+    if slug.is_empty() || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(format!("Identifiant invalide: {}", slug));
+    }
+    Ok(())
+}
+
+fn library_dir(app_handle: &tauri::AppHandle, kind: &str) -> Result<PathBuf, String> {
+    safe_library_kind(kind)?;
+    let mut dir = get_data_root(app_handle)?;
+    dir.push("data");
+    dir.push(kind);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// Dossier d'une collection : <appdata>/data/<kind>/<collection>/
+fn library_collection_dir(
+    app_handle: &tauri::AppHandle,
+    kind: &str,
+    collection: &Option<String>,
+) -> Result<PathBuf, String> {
+    let mut dir = library_dir(app_handle, kind)?;
+    if let Some(c) = collection {
+        safe_slug(c)?;
+        dir.push(c);
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    Ok(dir)
+}
+
+/// Hôtes autorisés au téléchargement, par type de contenu.
+///
+/// Les documents et le Mofon'aina viennent du dépôt du projet. Les audios, eux,
+/// sont hébergés ailleurs (Google Drive, sdahymnals...) : la liste reste
+/// explicite pour que cette commande ne devienne pas un téléchargeur d'URL
+/// arbitraire pilotable depuis la page.
+fn host_allowed(kind: &str, host: &str) -> bool {
+    let github = host == "raw.githubusercontent.com" || host.ends_with(".githubusercontent.com");
+    match kind {
+        "audio" => {
+            github
+                || host == "sdahymnals.com"
+                || host == "www.sdahymnals.com"
+                || host == "drive.google.com"
+                || host == "drive.usercontent.google.com"
+                || host.ends_with(".fanantenanahoanao.org")
+                || host == "fanantenanahoanao.org"
+                || host == "nybaiboly.net"
+                || host == "www.nybaiboly.net"
+        }
+        _ => github,
+    }
+}
+
+#[derive(Clone, Serialize)]
+struct DownloadProgress {
+    id: String,
+    received: u64,
+    total: u64,
+}
+
+/// Télécharge un fichier de la bibliothèque en émettant la progression.
+/// Les PDF vont jusqu'à ~30 Mo : on écrit au fil de l'eau plutôt que de garder
+/// tout le fichier en mémoire, et on informe l'interface pour éviter l'attente
+/// aveugle qui donnait l'impression que l'application était figée.
+#[tauri::command]
+async fn download_library_file(
+    app_handle: tauri::AppHandle,
+    url: String,
+    kind: String,
+    filename: String,
+    id: String,
+    collection: Option<String>,
+) -> Result<String, String> {
+    use tauri::Emitter;
+
+    safe_component(&filename)?;
+    let dir = library_collection_dir(&app_handle, &kind, &collection)?;
+
+    // Garde-fou anti-SSRF : pas de téléchargement d'URL arbitraire.
+    let parsed = reqwest::Url::parse(&url).map_err(|e| format!("URL invalide: {}", e))?;
+    let host = parsed.host_str().unwrap_or("");
+    if !host_allowed(&kind, host) {
+        return Err(format!("Hôte non autorisé: {}", host));
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("MyProjector/1.0")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut response = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("Téléchargement échoué ({}) : {}", response.status(), url));
+    }
+
+    let total = response.content_length().unwrap_or(0);
+    let dest_path = dir.join(&filename);
+    // Fichier temporaire : un téléchargement interrompu ne laisse jamais un
+    // fichier tronqué qui passerait pour installé.
+    let tmp_path = dir.join(format!("{}.part", filename));
+    let mut file = fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
+    let mut received: u64 = 0;
+    let mut last_emit: u64 = 0;
+
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        file.write_all(&chunk).map_err(|e| e.to_string())?;
+        received += chunk.len() as u64;
+        // On n'émet qu'environ tous les 256 Ko : sinon l'IPC sature l'interface.
+        if received - last_emit > 256 * 1024 || received == total {
+            last_emit = received;
+            let _ = app_handle.emit(
+                "library_download_progress",
+                DownloadProgress { id: id.clone(), received, total },
+            );
+        }
+    }
+
+    drop(file);
+    fs::rename(&tmp_path, &dest_path).map_err(|e| format!("renommage: {}", e))?;
+    Ok(dest_path.to_string_lossy().to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Entretien du stockage
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct StorageEntry {
+    id: String,
+    label: String,
+    bytes: u64,
+    files: usize,
+    /// true si l'utilisateur peut vider cette entrée sans rien perdre.
+    clearable: bool,
+    /// Chemin réel sur le disque, pour pouvoir ouvrir le dossier.
+    path: String,
+    exists: bool,
+}
+
+#[derive(Serialize)]
+struct StorageReport {
+    entries: Vec<StorageEntry>,
+    total: u64,
+    /// Téléchargements interrompus (.part) : invisibles ailleurs dans l'interface.
+    partial_files: usize,
+    partial_bytes: u64,
+    root: String,
+}
+
+/// Taille et nombre de fichiers d'un dossier, récursivement.
+fn dir_stats(dir: &Path) -> (u64, usize) {
+    let mut bytes = 0;
+    let mut count = 0;
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return (0, 0),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let (b, c) = dir_stats(&path);
+            bytes += b;
+            count += c;
+        } else if path.is_file() {
+            bytes += file_size(&path);
+            count += 1;
+        }
+    }
+    (bytes, count)
+}
+
+/// Liste les téléchargements inachevés sous un dossier.
+fn find_partials(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            find_partials(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("part") {
+            out.push(path);
+        }
+    }
+}
+
+#[tauri::command]
+fn storage_report(app_handle: tauri::AppHandle) -> Result<StorageReport, String> {
+    let root = get_data_root(&app_handle)?;
+    let audio_root = root.join("data").join("audio");
+
+    // Le cache d'écoute en ligne est compté à part : c'est le seul dossier
+    // qui grossit sans action explicite de l'utilisateur.
+    let cache_dir = audio_root.join(AUDIO_CACHE_DIR);
+    let (cache_bytes, cache_files) = dir_stats(&cache_dir);
+    let (audio_bytes, audio_files) = dir_stats(&audio_root);
+
+    let mut entries = Vec::new();
+    let mut add = |id: &str, label: &str, path: PathBuf, clearable: bool| {
+        let (bytes, files) = dir_stats(&path);
+        entries.push(StorageEntry {
+            id: id.into(), label: label.into(), bytes, files, clearable,
+            exists: path.exists(),
+            path: path.to_string_lossy().to_string(),
+        });
+    };
+
+    add("bible", "Bibles", root.join("data").join("bible"), false);
+    add("hymnes", "Recueils de chants", root.join("data").join("hymnes"), false);
+    add("docs", "Documents PDF", root.join("data").join("docs"), false);
+    add("mofonaina", "Mofon'aina", root.join("data").join("mofonaina"), false);
+    add("backgrounds", "Fonds d'écran", root.join("backgrounds"), false);
+    add("media", "Médias de l'agenda", root.join("media"), false);
+
+    entries.push(StorageEntry {
+        id: "audio".into(),
+        label: "Audios téléchargés".into(),
+        bytes: audio_bytes.saturating_sub(cache_bytes),
+        files: audio_files.saturating_sub(cache_files),
+        clearable: false,
+        exists: audio_root.exists(),
+        path: audio_root.to_string_lossy().to_string(),
+    });
+    entries.push(StorageEntry {
+        id: "audio_cache".into(),
+        label: "Cache des écoutes en ligne".into(),
+        bytes: cache_bytes,
+        files: cache_files,
+        clearable: true,
+        exists: cache_dir.exists(),
+        path: cache_dir.to_string_lossy().to_string(),
+    });
+
+    let mut partials = Vec::new();
+    find_partials(&root, &mut partials);
+    let partial_bytes = partials.iter().map(|p| file_size(p)).sum();
+
+    Ok(StorageReport {
+        total: entries.iter().map(|e| e.bytes).sum::<u64>() + partial_bytes,
+        entries,
+        partial_files: partials.len(),
+        partial_bytes,
+        root: root.to_string_lossy().to_string(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Télécommande sur le réseau local
+// ---------------------------------------------------------------------------
+// Serveur SÉPARÉ de celui des médias : celui-ci écoute sur le réseau, mais ne
+// sert AUCUN fichier — uniquement une petite page de commande et quatre ordres.
+// Le serveur de fichiers, lui, reste strictement sur 127.0.0.1.
+//
+// Il est éteint par défaut : c'est l'utilisateur qui l'allume, et un code à
+// 6 chiffres affiché dans l'application est exigé à chaque commande.
+
+const REMOTE_PORT: u16 = 11224;
+
+static REMOTE_SHUTDOWN: OnceLock<Mutex<Option<tokio::sync::oneshot::Sender<()>>>> = OnceLock::new();
+static REMOTE_CODE: OnceLock<Mutex<String>> = OnceLock::new();
+/// Ce qui est projeté en ce moment, publié par l'interface pour la télécommande.
+static REMOTE_STATE: OnceLock<Mutex<String>> = OnceLock::new();
+
+fn remote_shutdown_slot() -> &'static Mutex<Option<tokio::sync::oneshot::Sender<()>>> {
+    REMOTE_SHUTDOWN.get_or_init(|| Mutex::new(None))
+}
+
+fn remote_code_slot() -> &'static Mutex<String> {
+    REMOTE_CODE.get_or_init(|| Mutex::new(String::new()))
+}
+
+fn remote_state_slot() -> &'static Mutex<String> {
+    REMOTE_STATE.get_or_init(|| Mutex::new("{}".to_string()))
+}
+
+/// Publie l'état courant (titre projeté, diapo, direct on/off) pour l'affichage
+/// sur le téléphone. Appelé par l'interface à chaque changement.
+#[tauri::command]
+fn set_remote_state(state: String) -> Result<(), String> {
+    if let Ok(mut slot) = remote_state_slot().lock() {
+        *slot = state;
+    }
+    Ok(())
+}
+
+/// Code d'appairage à 6 chiffres, tiré de la source aléatoire du système.
+fn generate_code() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let n = std::collections::hash_map::RandomState::new().build_hasher().finish();
+    format!("{:06}", n % 1_000_000)
+}
+
+/// Adresses IPv4 locales, pour afficher l'URL à saisir sur le téléphone.
+fn local_addresses() -> Vec<String> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(out) = Command::new("hostname").arg("-I").output() {
+            return String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .filter(|a| a.contains('.') && !a.starts_with("127."))
+                .map(|a| a.to_string())
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+const REMOTE_PAGE: &str = r##"<!doctype html><html lang="fr"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#1a1b1e"><title>MyProjector</title><style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;font-family:system-ui,sans-serif;background:#1a1b1e;color:#eee;
+display:flex;flex-direction:column;min-height:100dvh;padding:14px;gap:10px}
+h1{font-size:13px;margin:0;text-align:center;color:#8891f2;letter-spacing:.18em}
+input{width:100%;padding:13px;font-size:19px;text-align:center;letter-spacing:.3em;
+border-radius:10px;border:1px solid #333;background:#232428;color:#fff}
+#now{background:#232428;border:1px solid #2f3136;border-radius:10px;padding:10px 12px;min-height:52px}
+#dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#666;margin-right:6px}
+#dot.on{background:#22c55e}
+#t{font-size:14px;font-weight:700;margin:2px 0 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#s{font-size:11px;color:#8a8d93}
+button{border:0;border-radius:12px;background:#2b2d31;color:#fff;font-size:15px;
+font-weight:700;padding:16px 10px;cursor:pointer;transition:background .1s}
+button:active{background:#5865f2}
+.nav{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.nav button{font-size:20px;padding:30px 10px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.g3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+.b{background:#000;border:1px solid #444}.w{background:#e5e5e5;color:#111}
+.lab{font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.12em;margin:4px 0 -2px}
+#msg{text-align:center;font-size:12px;min-height:16px;color:#888;margin:0}
+</style></head><body>
+<h1>MYPROJECTOR</h1>
+<input id="code" inputmode="numeric" maxlength="6" placeholder="code">
+<div id="now"><span id="dot"></span><span id="s">en attente…</span><p id="t">—</p></div>
+
+<div class="nav">
+<button onclick="cmd('prev')">&#9650;<br>PRÉCÉDENT</button>
+<button onclick="cmd('next')">&#9660;<br>SUIVANT</button>
+</div>
+
+<p class="lab">Écran</p>
+<div class="g3">
+<button class="b" onclick="cmd('black')">Noir</button>
+<button class="w" onclick="cmd('white')">Blanc</button>
+<button onclick="cmd('normal')">Reprendre</button>
+</div>
+
+<p class="lab">Projection</p>
+<div class="grid">
+<button onclick="cmd('live')">Direct on/off</button>
+<button onclick="cmd('base')">Écran d'accueil</button>
+<button onclick="cmd('start')">Démarrer l'agenda</button>
+<button onclick="cmd('hide')">Masquer le texte</button>
+</div>
+
+<p class="lab">Affichage</p>
+<div class="grid">
+<button onclick="cmd('clock')">Horloge</button>
+<button onclick="cmd('ticker')">Bandeau</button>
+</div>
+
+<p id="msg"></p>
+<script>
+var i=document.getElementById('code'),m=document.getElementById('msg');
+var t=document.getElementById('t'),st=document.getElementById('s'),dot=document.getElementById('dot');
+i.value=localStorage.getItem('c')||'';
+i.oninput=function(){localStorage.setItem('c',i.value)};
+function cmd(a){
+  if(i.value.length!==6){m.textContent="Entrez le code affiché sur l'ordinateur";return}
+  fetch('/cmd/'+i.value+'/'+a).then(function(r){
+    m.textContent=r.ok?'':'Code refusé';
+    if(r.ok&&navigator.vibrate)navigator.vibrate(20);
+    setTimeout(poll,250);
+  }).catch(function(){m.textContent='Hors de portée'});
+}
+function poll(){
+  if(i.value.length!==6)return;
+  fetch('/state/'+i.value).then(function(r){return r.json()}).then(function(d){
+    dot.className=d.live?'on':'';
+    st.textContent=d.live?(d.base?'Écran d\'accueil':'En direct'):'Projection coupée';
+    t.textContent=d.title||'—';
+    if(d.slides>1)st.textContent+=' · diapo '+(d.slide+1)+'/'+d.slides;
+  }).catch(function(){});
+}
+poll();setInterval(poll,2000);
+</script></body></html>"##;
+
+#[derive(Serialize)]
+struct RemoteStatus {
+    enabled: bool,
+    code: String,
+    port: u16,
+    urls: Vec<String>,
+}
+
+fn current_remote_status(enabled: bool) -> RemoteStatus {
+    RemoteStatus {
+        enabled,
+        code: remote_code_slot().lock().map(|c| c.clone()).unwrap_or_default(),
+        port: REMOTE_PORT,
+        urls: local_addresses().iter().map(|a| format!("http://{}:{}", a, REMOTE_PORT)).collect(),
+    }
+}
+
+#[tauri::command]
+fn remote_status() -> Result<RemoteStatus, String> {
+    let running = remote_shutdown_slot().lock().map(|s| s.is_some()).unwrap_or(false);
+    Ok(current_remote_status(running))
+}
+
+#[tauri::command]
+fn set_remote_enabled(app_handle: tauri::AppHandle, enabled: bool) -> Result<RemoteStatus, String> {
+    // Arrêt : on consomme le signal d'extinction.
+    if !enabled {
+        if let Ok(mut slot) = remote_shutdown_slot().lock() {
+            if let Some(tx) = slot.take() {
+                let _ = tx.send(());
+            }
+        }
+        return Ok(current_remote_status(false));
+    }
+
+    // Déjà démarré ?
+    if remote_shutdown_slot().lock().map(|s| s.is_some()).unwrap_or(false) {
+        return Ok(current_remote_status(true));
+    }
+
+    // Nouveau code à chaque activation : un ancien code ne rouvre jamais l'accès.
+    let code = generate_code();
+    if let Ok(mut c) = remote_code_slot().lock() {
+        *c = code.clone();
+    }
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    if let Ok(mut slot) = remote_shutdown_slot().lock() {
+        *slot = Some(tx);
+    }
+
+    let handle = app_handle.clone();
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => { eprintln!("Télécommande: runtime: {}", e); return; }
+        };
+        rt.block_on(async move {
+            use tauri::Emitter;
+
+            let page = warp::path::end()
+                .map(|| warp::reply::html(REMOTE_PAGE));
+
+            let expected = code.clone();
+            let cmd = warp::path!("cmd" / String / String)
+                .map(move |given: String, action: String| {
+                    // Code exigé à chaque commande.
+                    if given != expected {
+                        return warp::reply::with_status("code refusé", warp::http::StatusCode::FORBIDDEN);
+                    }
+                    // Liste blanche stricte : rien d'autre ne passe.
+                    let allowed = [
+                        "next", "prev", "black", "white", "normal", "hide",
+                        "live", "base", "start", "clock", "ticker",
+                    ];
+                    if !allowed.contains(&action.as_str()) {
+                        return warp::reply::with_status("action inconnue", warp::http::StatusCode::BAD_REQUEST);
+                    }
+                    let _ = handle.emit("remote_command", action);
+                    warp::reply::with_status("ok", warp::http::StatusCode::OK)
+                });
+
+            // État courant : lu par la page du téléphone toutes les 2 s.
+            // Protégé par le même code que les commandes.
+            let expected_state = code.clone();
+            let state = warp::path!("state" / String).map(move |given: String| {
+                if given != expected_state {
+                    return warp::reply::with_status(
+                        String::from("{}"), warp::http::StatusCode::FORBIDDEN,
+                    );
+                }
+                let body = remote_state_slot().lock().map(|s| s.clone()).unwrap_or_else(|_| "{}".into());
+                warp::reply::with_status(body, warp::http::StatusCode::OK)
+            });
+
+            let routes = page.or(cmd).or(state);
+            println!("Télécommande active sur le port {} (code {})", REMOTE_PORT, code);
+            // `graceful` reçoit le signal d'extinction envoyé par set_remote_enabled(false).
+            warp::serve(routes)
+                .bind(([0, 0, 0, 0], REMOTE_PORT))
+                .await
+                .graceful(async { let _ = rx.await; })
+                .run()
+                .await;
+            println!("Télécommande arrêtée");
+        });
+    });
+
+    Ok(current_remote_status(true))
+}
+
+// ---------------------------------------------------------------------------
+// Historique des projections
+// ---------------------------------------------------------------------------
+// Répond à « qu'est-ce qu'on a chanté le mois dernier ? » et évite de reprendre
+// trois fois le même cantique. Stocké dans une base à part : aucun risque pour
+// les recueils, et la suppression est immédiate.
+
+fn history_db(app_handle: &tauri::AppHandle) -> Result<Connection, String> {
+    let mut path = get_data_root(app_handle)?;
+    path.push("data");
+    fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    path.push("history.db");
+
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS projections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            number TEXT,
+            book TEXT
+        )",
+        [],
+    ).map_err(|e| e.to_string())?;
+    Ok(conn)
+}
+
+#[derive(Serialize)]
+struct HistoryRow {
+    id: i64,
+    ts: i64,
+    kind: String,
+    title: String,
+    number: Option<String>,
+    book: Option<String>,
+}
+
+#[derive(Serialize)]
+struct HistoryTop {
+    title: String,
+    number: Option<String>,
+    count: i64,
+    last_ts: i64,
+}
+
+/// Enregistre une projection. Le doublon immédiat (même titre projeté à
+/// nouveau dans les 30 minutes) n'est pas ré-enregistré : sinon revenir sur un
+/// chant pendant le culte fausserait complètement les statistiques.
+#[tauri::command]
+fn record_projection(
+    app_handle: tauri::AppHandle,
+    kind: String,
+    title: String,
+    number: Option<String>,
+    book: Option<String>,
+) -> Result<(), String> {
+    if title.trim().is_empty() {
+        return Ok(());
+    }
+    let conn = history_db(&app_handle)?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64).unwrap_or(0);
+
+    let recent: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM projections WHERE title = ?1 AND ts > ?2",
+        rusqlite::params![&title, now - 1800],
+        |r| r.get(0),
+    ).unwrap_or(0);
+    if recent > 0 {
+        return Ok(());
+    }
+
+    conn.execute(
+        "INSERT INTO projections (ts, kind, title, number, book) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![now, kind, title, number, book],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn history_recent(app_handle: tauri::AppHandle, limit: Option<i64>) -> Result<Vec<HistoryRow>, String> {
+    let conn = history_db(&app_handle)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, ts, kind, title, number, book FROM projections ORDER BY ts DESC LIMIT ?1"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([limit.unwrap_or(100)], |r| {
+        Ok(HistoryRow {
+            id: r.get(0)?, ts: r.get(1)?, kind: r.get(2)?,
+            title: r.get(3)?, number: r.get(4)?, book: r.get(5)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// Chants les plus projetés depuis `since_days` jours.
+#[tauri::command]
+fn history_top(app_handle: tauri::AppHandle, since_days: Option<i64>, limit: Option<i64>) -> Result<Vec<HistoryTop>, String> {
+    let conn = history_db(&app_handle)?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64).unwrap_or(0);
+    let since = now - since_days.unwrap_or(365) * 86400;
+
+    let mut stmt = conn.prepare(
+        "SELECT title, number, COUNT(*) as n, MAX(ts) FROM projections
+         WHERE ts >= ?1 AND kind IN ('hymnes', 'agenda')
+         GROUP BY title ORDER BY n DESC, MAX(ts) DESC LIMIT ?2"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(rusqlite::params![since, limit.unwrap_or(20)], |r| {
+        Ok(HistoryTop { title: r.get(0)?, number: r.get(1)?, count: r.get(2)?, last_ts: r.get(3)? })
+    }).map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn history_clear(app_handle: tauri::AppHandle) -> Result<(), String> {
+    let conn = history_db(&app_handle)?;
+    conn.execute("DELETE FROM projections", []).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic de l'environnement
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct Check {
+    id: String,
+    label: String,
+    /// "ok" | "warn" | "error"
+    level: String,
+    detail: String,
+    /// Commande à copier pour corriger, quand il y en a une.
+    fix: Option<String>,
+}
+
+fn check(id: &str, label: &str, level: &str, detail: String, fix: Option<String>) -> Check {
+    Check { id: id.into(), label: label.into(), level: level.into(), detail, fix }
+}
+
+/// Un décodeur GStreamer est-il disponible ? C'est la cause n°1 des vidéos
+/// muettes/figées sur une machine fraîchement installée.
+#[cfg(target_os = "linux")]
+fn check_gstreamer() -> Check {
+    let inspect = Command::new("gst-inspect-1.0").arg("avdec_h264").output();
+    match inspect {
+        Ok(out) if out.status.success() => check(
+            "codecs", "Décodeurs vidéo (H.264)", "ok",
+            "Le décodeur avdec_h264 est disponible.".into(), None,
+        ),
+        Ok(_) => check(
+            "codecs", "Décodeurs vidéo (H.264)", "error",
+            "avdec_h264 est introuvable : les vidéos MP4 ne se liront pas.".into(),
+            Some("sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-good gstreamer1.0-plugins-bad".into()),
+        ),
+        Err(_) => check(
+            "codecs", "Décodeurs vidéo (H.264)", "warn",
+            "gst-inspect-1.0 est absent : impossible de vérifier les codecs.".into(),
+            Some("sudo apt install gstreamer1.0-tools gstreamer1.0-libav".into()),
+        ),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn check_gstreamer() -> Check {
+    check("codecs", "Décodeurs vidéo", "ok", "Fournis par le système.".into(), None)
+}
+
+#[tauri::command]
+fn run_diagnostics(app_handle: tauri::AppHandle) -> Result<Vec<Check>, String> {
+    let mut checks = Vec::new();
+
+    checks.push(check_gstreamer());
+
+    // Serveur média local : on tente une vraie connexion TCP.
+    let server = std::net::TcpStream::connect_timeout(
+        &"127.0.0.1:11223".parse().map_err(|e| format!("{}", e))?,
+        std::time::Duration::from_millis(600),
+    );
+    checks.push(match server {
+        Ok(_) => check("server", "Serveur média local", "ok",
+            "Actif sur 127.0.0.1:11223.".into(), None),
+        Err(e) => check("server", "Serveur média local", "error",
+            format!("Injoignable ({}). Fonds, médias et PDF ne s'afficheront pas.", e),
+            Some("Redémarrer l'application".into())),
+    });
+
+    // ffmpeg : optionnel, sert à alléger les médias trop lourds.
+    checks.push(match ffmpeg_path() {
+        Some(p) => check("ffmpeg", "Optimisation des médias (ffmpeg)", "ok",
+            format!("Trouvé : {}", p.to_string_lossy()), None),
+        None => check("ffmpeg", "Optimisation des médias (ffmpeg)", "warn",
+            "Absent : les vidéos lourdes ne seront pas compressées automatiquement.".into(),
+            Some("sudo apt install ffmpeg".into())),
+    });
+
+    // Écrans : sans second écran, la projection s'ouvre sur le même moniteur.
+    let monitors = app_handle
+        .webview_windows()
+        .values()
+        .next()
+        .and_then(|w| w.available_monitors().ok())
+        .map(|m| m.len())
+        .unwrap_or(0);
+    checks.push(if monitors >= 2 {
+        check("screens", "Écrans détectés", "ok", format!("{} écrans disponibles.", monitors), None)
+    } else {
+        check("screens", "Écrans détectés", "warn",
+            format!("{} écran détecté : la projection s'ouvrira sur le même écran que le contrôleur.", monitors),
+            None)
+    });
+
+    // Contenus installés : une application sans recueil ni bible ne sert à rien.
+    let root = get_data_root(&app_handle)?;
+    let (_, hymn_files) = dir_stats(&root.join("data").join("hymnes"));
+    let (_, bible_files) = dir_stats(&root.join("data").join("bible"));
+    checks.push(if hymn_files > 0 || bible_files > 0 {
+        check("content", "Contenus installés", "ok",
+            format!("{} recueil(s) et {} bible(s).", hymn_files, bible_files), None)
+    } else {
+        check("content", "Contenus installés", "warn",
+            "Aucun recueil ni bible installé.".into(),
+            Some("Bibliothèque → Recueils / Bibles".into()))
+    });
+
+    // Espace disque du volume contenant les données.
+    #[cfg(unix)]
+    {
+        if let Ok(out) = Command::new("df").arg("-h").arg("--output=avail").arg(&root).output() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if let Some(avail) = text.lines().nth(1) {
+                checks.push(check("disk", "Espace disque disponible", "ok",
+                    format!("{} libres sur le volume des données.", avail.trim()), None));
+            }
+        }
+    }
+
+    Ok(checks)
+}
+
+/// Liste les médias importés dans l'agenda, du plus lourd au plus léger.
+///
+/// Ces fichiers ne sont volontairement pas supprimés automatiquement : un même
+/// média peut servir dans un agenda enregistré qui n'est pas ouvert. C'est donc
+/// à l'utilisateur de décider, en voyant les noms et les tailles.
+#[tauri::command]
+fn list_media_files(app_handle: tauri::AppHandle) -> Result<Vec<LibraryFile>, String> {
+    let dir = get_data_root(&app_handle)?.join("media");
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    for entry in fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+        let path = entry.path();
+        if !path.is_file() { continue; }
+        let filename = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        files.push(LibraryFile {
+            filename,
+            path: path.to_string_lossy().to_string(),
+            size: file_size(&path),
+        });
+    }
+    files.sort_by(|a, b| b.size.cmp(&a.size));
+    Ok(files)
+}
+
+/// Vide le cache des écoutes en ligne. Aucun contenu téléchargé n'est touché.
+#[tauri::command]
+fn clear_audio_cache(app_handle: tauri::AppHandle) -> Result<u64, String> {
+    let dir = get_data_root(&app_handle)?
+        .join("data").join("audio").join(AUDIO_CACHE_DIR);
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let (bytes, _) = dir_stats(&dir);
+    fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+
+/// Supprime les téléchargements interrompus (.part) restés sur le disque.
+#[tauri::command]
+fn clean_partial_downloads(app_handle: tauri::AppHandle) -> Result<u64, String> {
+    let root = get_data_root(&app_handle)?;
+    let mut partials = Vec::new();
+    find_partials(&root, &mut partials);
+    let mut freed = 0;
+    for p in partials {
+        freed += file_size(&p);
+        let _ = fs::remove_file(&p);
+    }
+    Ok(freed)
+}
+
+#[derive(Serialize)]
+struct LibraryFile {
+    filename: String,
+    path: String,
+    size: u64,
+}
+
+#[tauri::command]
+fn list_library_files(
+    app_handle: tauri::AppHandle,
+    kind: String,
+    collection: Option<String>,
+) -> Result<Vec<LibraryFile>, String> {
+    let dir = library_collection_dir(&app_handle, &kind, &collection)?;
+    let mut files = Vec::new();
+    for entry in fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+        let path = entry.path();
+        if !path.is_file() { continue; }
+        let filename = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        // Les .part sont des téléchargements inachevés : ils ne comptent pas.
+        if filename.ends_with(".part") { continue; }
+        files.push(LibraryFile {
+            filename,
+            path: path.to_string_lossy().to_string(),
+            size: file_size(&path),
+        });
+    }
+    Ok(files)
+}
+
+#[tauri::command]
+fn delete_library_file(
+    app_handle: tauri::AppHandle,
+    kind: String,
+    filename: String,
+    collection: Option<String>,
+) -> Result<(), String> {
+    safe_component(&filename)?;
+    let path = library_collection_dir(&app_handle, &kind, &collection)?.join(&filename);
+    if path.exists() {
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Lit un fichier JSON déjà téléchargé (Mofon'aina). Passe par Rust plutôt que
+/// par fetch() pour ne dépendre ni du serveur warp ni de la CSP.
+#[tauri::command]
+fn read_library_json(app_handle: tauri::AppHandle, kind: String, filename: String) -> Result<String, String> {
+    safe_component(&filename)?;
+    let path = library_dir(&app_handle, &kind)?.join(&filename);
+    fs::read_to_string(&path).map_err(|e| format!("Lecture de {}: {}", filename, e))
+}
+
+/// Liste les trimestres Mofon'aina disponibles sur GitHub.
+/// Appelé depuis Rust car l'API GitHub n'est pas autorisée par la CSP du webview.
+#[tauri::command]
+async fn list_remote_mofonaina() -> Result<Vec<String>, String> {
+    let client = reqwest::Client::builder()
+        .user_agent("MyProjector/1.0")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .get("https://api.github.com/repos/Brayan-Clark/adventools/contents/mofonaina?ref=data")
+        .send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub a répondu {}", resp.status()));
+    }
+    let items: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let mut names = Vec::new();
+    if let Some(arr) = items.as_array() {
+        for it in arr {
+            if let Some(name) = it.get("name").and_then(|n| n.as_str()) {
+                if name.ends_with(".json") {
+                    names.push(name.to_string());
+                }
+            }
+        }
+    }
+    names.sort();
+    names.reverse(); // le trimestre le plus récent en premier
+    Ok(names)
 }
 
 #[tauri::command]
@@ -843,13 +1834,48 @@ fn get_app_data_path(app_handle: tauri::AppHandle) -> Result<String, String> {
     Ok(path.to_string_lossy().to_string())
 }
 
+// Sous Linux (WebKitGTK) la lecture automatique dépend des réglages du webview.
+// Selon la version de webkit2gtk installée sur la machine,
+// `media-playback-requires-user-gesture` peut être à TRUE : la vidéo de fond
+// n'est alors jamais lancée et WebKit affiche un gros bouton "play" au milieu.
+// On force donc explicitement les réglages média à chaque webview créé.
+#[cfg(target_os = "linux")]
+fn apply_media_settings(webkit_webview: &webkit2gtk::WebView) {
+    use webkit2gtk::{SettingsExt, WebViewExt};
+    if let Some(settings) = WebViewExt::settings(webkit_webview) {
+        // Autoplay : aucune interaction requise (c'est un fond, il doit tourner seul)
+        settings.set_media_playback_requires_user_gesture(false);
+        settings.set_media_playback_allows_inline(true);
+        settings.set_enable_media_stream(true);
+        settings.set_enable_webaudio(true);
+        settings.set_enable_webgl(true);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
     {
+        // Toutes ces variables sont posées UNIQUEMENT si l'utilisateur ne les a
+        // pas déjà définies : on peut donc diagnostiquer/annuler chaque réglage
+        // depuis le terminal sans recompiler (ex: WEBKIT_DISABLE_DMABUF_RENDERER=0).
+        fn set_env_default(key: &str, value: &str) {
+            if std::env::var_os(key).is_none() {
+                std::env::set_var(key, value);
+            }
+        }
+
         // Fix for AppImage -- disable GPU compositing to prevent green screen artifacts
         // NOTE: We intentionally do NOT disable HW_ACCELERATION as that breaks video playback
-        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        set_env_default("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+
+        // FENETRE NOIRE / VIDE au lancement (surtout en AppImage) :
+        // depuis WebKitGTK 2.42, le rendu passe par un "DMA-BUF renderer" qui
+        // échoue silencieusement sur beaucoup de configs (pilotes NVIDIA
+        // propriétaires, Mesa ancien, machines virtuelles, Wayland+Xwayland).
+        // Le processus se lance normalement mais ne peint jamais rien.
+        // On repasse sur le chemin de rendu classique, qui marche partout.
+        set_env_default("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
         
         // Force GStreamer to use bundled plugins (important for AppImage)
         // This avoids conflicts with system gstreamer plugins that may not support H264/VP8
@@ -879,6 +1905,7 @@ pub fn run() {
                 for window in app.webview_windows().values() {
                     let _ = window.with_webview(|webview| {
                         let webkit_webview = webview.inner();
+                        apply_media_settings(&webkit_webview);
                         webkit_webview.connect_permission_request(|_view, request: &webkit2gtk::PermissionRequest| {
                             if let Ok(user_media_request) = request.clone().downcast::<webkit2gtk::UserMediaPermissionRequest>() {
                                 println!("Granting camera/mic permission for window on Linux");
@@ -942,6 +1969,12 @@ pub fn run() {
                         println!("Optimisation des médias: ffmpeg introuvable, ignoré.");
                         return;
                     }
+                    // JAMAIS pendant une projection : une compression H.264 sature
+                    // le CPU et fige le passage à la diapo suivante. On attend que
+                    // la fenêtre "live" soit refermée.
+                    while handle.get_webview_window("live").is_some() {
+                        std::thread::sleep(std::time::Duration::from_secs(30));
+                    }
                     let root = match handle.path().app_data_dir() {
                         Ok(p) => p,
                         Err(e) => {
@@ -950,8 +1983,9 @@ pub fn run() {
                         }
                     };
                     let mut report = OptimizeReport { scanned: 0, compressed: 0, skipped: 0, errors: 0, messages: Vec::new() };
-                    scan_folder(&root.join("backgrounds"), &mut report);
-                    scan_folder(&root.join("media"), &mut report);
+                    let presenting = || handle.get_webview_window("live").is_some();
+                    scan_folder(&root.join("backgrounds"), &mut report, &presenting);
+                    scan_folder(&root.join("media"), &mut report, &presenting);
                     println!(
                         "Optimisation des médias terminée: {} analysés, {} compressés, {} déjà légers, {} erreurs",
                         report.scanned, report.compressed, report.skipped, report.errors
@@ -979,7 +2013,10 @@ pub fn run() {
                 if let Some(webview_window) = window.get_webview_window(window.label()) {
                     let _ = webview_window.with_webview(|platform_webview: tauri::webview::PlatformWebview| {
                         let webkit_webview = platform_webview.inner();
-                        
+                        // La fenêtre de projection est créée après le setup :
+                        // on ré-applique les réglages média ici aussi.
+                        apply_media_settings(&webkit_webview);
+
                         // On utilise un tag GLib pour ne pas connecter le signal plusieurs fois
                         let has_handler = unsafe { 
                             webkit_webview.data::<bool>("permission_handler_attached").is_some() 
@@ -1025,7 +2062,24 @@ pub fn run() {
             get_app_data_path,
             read_text_file,
             save_playlist_file,
-            read_playlist_file
+            read_playlist_file,
+            download_library_file,
+            list_library_files,
+            delete_library_file,
+            read_library_json,
+            list_remote_mofonaina,
+            storage_report,
+            list_media_files,
+            run_diagnostics,
+            record_projection,
+            history_recent,
+            history_top,
+            history_clear,
+            remote_status,
+            set_remote_enabled,
+            set_remote_state,
+            clear_audio_cache,
+            clean_partial_downloads
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

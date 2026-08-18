@@ -1,5 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { FileText, Plus, Save, Edit3, Eye } from 'lucide-react';
+import { AudioPlayer } from './AudioPlayer';
+import { MarkdownView } from './MarkdownView';
+import { getSlides } from '../lib/slides';
+import { fileExtension, isProjectableDocument, openWithSystem } from '../lib/openExternal';
 import { invoke } from '@tauri-apps/api/core';
 import { cleanUrl } from '../lib/media';
 import { PdfViewer } from './PdfViewer';
@@ -12,6 +16,7 @@ export function MiddleEditor({
   onProjectPage: (page: number) => void
 }) {
   const [isEditing, setIsEditing] = useState(false);
+  const [openError, setOpenError] = useState<string | null>(null);
   const [localTitle, setLocalTitle] = useState("");
   const [localContent, setLocalContent] = useState("");
   const [isSaving, setIsSaving] = useState(false);
@@ -89,6 +94,12 @@ export function MiddleEditor({
       setIsSaving(false);
     }
   };
+  // Aperçu vivant : on découpe le texte EN COURS d'édition, pas celui enregistré.
+  const slides = useMemo(
+    () => (activeSong?.type === 'markdown' ? getSlides({ ...activeSong, lyrics: localContent }) : []),
+    [activeSong, localContent]
+  );
+
   if (!activeSong) {
     return (
       <div className="flex-1 bg-[#36393f] flex items-center justify-center text-gray-500">
@@ -118,6 +129,10 @@ export function MiddleEditor({
               <Edit3 size={12} /> Éditer
            </button>
         </div>
+
+        {/* Audio associé : playback d'un cantique ou chapitre de la Bible
+            malgache. N'apparaît que si l'élément en a un. */}
+        <AudioPlayer song={activeSong} />
         <div className="ml-auto flex items-center gap-3">
            {!isEditing && activeSong?.type === 'document' && (
               <div className="flex items-center gap-3 bg-[#202225] px-2 py-0.5 rounded border border-[#18191c]">
@@ -178,7 +193,34 @@ export function MiddleEditor({
       {/* Editeur Texte — layout adaptatif selon le type */}
       {(activeSong?.type === 'image' || activeSong?.type === 'video' || activeSong?.type === 'audio' || activeSong?.type === 'document') ? (
         <div className="flex-1 flex flex-col overflow-hidden relative" style={{ minHeight: 0 }}>
-          {activeSong.type === 'document' ? (
+          {activeSong.type === 'document' && !isProjectableDocument(localContent) ? (
+            /* ---- Format non affichable : on délègue au système ----
+               Pas de convertisseur imposé : la machine de l'utilisateur ouvre
+               le fichier avec ce qu'elle a (LibreOffice, WPS, OnlyOffice…). */
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-[#2b2d31] p-8 text-center">
+              <div className="flex h-20 w-20 items-center justify-center rounded-2xl bg-[#5865f2]/15">
+                <FileText size={34} className="text-[#8891f2]" />
+              </div>
+              <div>
+                <p className="text-sm font-bold text-gray-100">Fichier {fileExtension(localContent)}</p>
+                <p className="mt-1 max-w-md text-xs leading-relaxed text-gray-400">
+                  Ce format ne s'affiche pas dans la fenêtre de projection. Ouvre-le avec le
+                  programme de ton ordinateur, ou convertis-le en PDF pour pouvoir le projeter.
+                </p>
+              </div>
+              <button
+                onClick={async () => setOpenError(await openWithSystem(localContent))}
+                className="flex items-center gap-2 rounded bg-[#5865f2] px-4 py-2 text-xs font-bold text-white transition hover:bg-[#4752c4]"
+              >
+                <Eye size={14} /> Ouvrir avec l'application par défaut
+              </button>
+              {openError && (
+                <p className="max-w-md rounded border border-red-500/20 bg-red-500/10 p-2 text-[10px] text-red-400">
+                  {openError}
+                </p>
+              )}
+            </div>
+          ) : activeSong.type === 'document' ? (
             /* ---- PDF / Texte (rendu via PDF.js, identique en dev et build) ---- */
             <div className="absolute inset-0 bg-white overflow-hidden">
                {textContent ? (
@@ -237,6 +279,41 @@ export function MiddleEditor({
               )}
             </div>
           )}
+        </div>
+      ) : activeSong?.type === 'markdown' ? (
+        /* ====== MARKDOWN : édition côte à côte, aperçu fidèle ====== */
+        <div className="flex-1 flex flex-col overflow-hidden" style={{ minHeight: 0 }}>
+          <div className="flex items-center gap-3 px-4 py-1.5 bg-[#2b2d31] border-b border-[#202225] text-[10px] text-gray-500">
+            <span className="font-bold uppercase tracking-wider text-[#5865f2]">Markdown</span>
+            <span>{slides.length} diapo{slides.length > 1 ? 's' : ''}</span>
+            <span className="opacity-70">
+              Séparez les diapos par une ligne <code className="bg-[#18191c] px-1 rounded">---</code> ·
+              médias : <code className="bg-[#18191c] px-1 rounded">![](clip.mp4)</code> ·
+              maths : <code className="bg-[#18191c] px-1 rounded">$E=mc^2$</code>
+            </span>
+          </div>
+
+          <div className="flex-1 flex min-h-0">
+            {isEditing && (
+              <textarea
+                className="w-1/2 h-full bg-[#18191c] p-3 text-gray-200 resize-none outline-none leading-relaxed text-sm font-mono border-r border-[#202225]"
+                value={localContent}
+                onChange={(e) => setLocalContent(e.target.value)}
+                placeholder={"# Titre\n\nTexte en **gras**, liste :\n- point\n\n---\n\n## Diapo suivante"}
+                spellCheck={false}
+              />
+            )}
+            <div className={`${isEditing ? 'w-1/2' : 'w-full'} h-full overflow-y-auto p-4 text-gray-200`}>
+              {slides.map((slide: string, i: number) => (
+                <div key={i} className="mb-4 rounded border border-[#202225] bg-[#2b2d31] p-3">
+                  <div className="mb-2 text-[9px] font-bold uppercase tracking-widest text-gray-500">
+                    Diapo {i + 1}
+                  </div>
+                  <MarkdownView content={slide} variant="editor" />
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       ) : (
         /* ====== MODE TEXTE / EDIT ====== */

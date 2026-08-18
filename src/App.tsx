@@ -2,6 +2,8 @@ import { useState, useEffect, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Toolbar } from './components/Toolbar';
 import { LeftSidebar } from './components/LeftSidebar';
+import { getSlides } from './lib/slides';
+import { isTypingTarget } from './lib/keys';
 import { MiddleEditor } from './components/MiddleEditor';
 import { RightProjection } from './components/RightProjection';
 import { LiveView } from './components/LiveView';
@@ -194,6 +196,29 @@ function App() {
         e.preventDefault();
         setTickerSettings((prev: any) => ({ ...prev, enabled: !prev.enabled }));
       }
+
+      // --- Télécommandes de présentation (clickers Bluetooth / USB) ---------
+      // Elles envoient des touches standard, sans Alt. On ne retient que des
+      // touches non ambiguës, et jamais pendant une saisie.
+      if (!e.altKey && !e.ctrlKey && !isTypingTarget(e.target)) {
+        // « . » : écran noir, comme dans les logiciels de présentation.
+        if (e.key === '.') {
+          e.preventDefault();
+          setOverlayColor((prev: any) => {
+            const next = prev === 'black' ? null : 'black';
+            import('@tauri-apps/api/event').then(({ emit }) => emit('update_live_overlay', next));
+            return next;
+          });
+        }
+        // Échap : retirer le voile et revenir à l'affichage normal.
+        if (e.key === 'Escape') {
+          setOverlayColor((prev: any) => {
+            if (prev === null) return prev;
+            import('@tauri-apps/api/event').then(({ emit }) => emit('update_live_overlay', null));
+            return null;
+          });
+        }
+      }
     };
     window.addEventListener('keydown', handleGlobalShortcuts);
     return () => window.removeEventListener('keydown', handleGlobalShortcuts);
@@ -385,6 +410,12 @@ function App() {
     if (!isBaseScreenProjected && projectedSong) {
       if (['image', 'video', 'document', 'audio', 'youtube', 'link'].includes(projectedSong.type)) {
         mediaObj = { type: projectedSong.type, url: projectedSong.lyrics };
+      } else if (projectedSong.type === 'markdown') {
+        // Le Markdown garde sa structure : on transmet la diapo courante telle
+        // quelle, la fenêtre de projection s'occupe du rendu.
+        const slides = getSlides(projectedSong);
+        const safeIdx = Math.max(0, Math.min(projectedVerseIdx, slides.length - 1));
+        mediaObj = { type: 'markdown', url: slides[safeIdx] || '' };
       } else {
         const verses = projectedSong.lyrics.split(/\n\s*\n/);
         const safeIdx = Math.max(0, Math.min(projectedVerseIdx, verses.length - 1));
@@ -425,6 +456,67 @@ function App() {
     }, 50);
     return () => clearTimeout(timer);
   }, [isLiveActive, computedLiveSettings, projectedSong, projectedVerseIdx, isBaseScreenProjected, isContentHidden, liveCategory, clockSettings, tickerSettings, isCameraActive, selectedCamera, pdfWidth, pdfHeight]);
+
+  // Télécommande : on rejoue les raccourcis clavier existants plutôt que de
+  // dupliquer la navigation. Toute la logique (fin de chant → écran de base,
+  // projection automatique…) reste donc au même endroit.
+  useEffect(() => {
+    const KEYS: Record<string, { key: string; alt?: boolean }> = {
+      next:   { key: 'ArrowDown' },
+      prev:   { key: 'ArrowUp' },
+      black:  { key: 'n', alt: true },
+      white:  { key: 'w', alt: true },
+      normal: { key: 'r', alt: true },
+      hide:   { key: 'h', alt: true },
+      live:   { key: 'l', alt: true },
+      base:   { key: 'b', alt: true },
+      start:  { key: 'p', alt: true },
+      clock:  { key: 'c', alt: true },
+      ticker: { key: 'm', alt: true },
+    };
+
+    let unlisten: any;
+    import('@tauri-apps/api/event').then(({ listen }) => {
+      listen<string>('remote_command', (e) => {
+        const mapped = KEYS[e.payload];
+        if (!mapped) return;
+        window.dispatchEvent(new KeyboardEvent('keydown', {
+          key: mapped.key,
+          altKey: !!mapped.alt,
+          bubbles: true,
+        }));
+      }).then((u) => { unlisten = u; });
+    });
+    return () => { if (unlisten) unlisten(); };
+  }, []);
+
+  // État publié pour la télécommande : l'opérateur voit sur son téléphone ce
+  // qui est réellement projeté, plutôt que de cliquer à l'aveugle.
+  useEffect(() => {
+    const slides = projectedSong ? getSlides(projectedSong).length : 0;
+    invoke('set_remote_state', {
+      state: JSON.stringify({
+        live: isLiveActive,
+        base: isBaseScreenProjected,
+        title: isBaseScreenProjected ? "Écran d'accueil" : (projectedSong?.title || ''),
+        slide: projectedVerseIdx < 0 ? 0 : projectedVerseIdx,
+        slides,
+      }),
+    }).catch(() => null);
+  }, [isLiveActive, isBaseScreenProjected, projectedSong, projectedVerseIdx]);
+
+  // Historique : on note ce qui part réellement à l'écran, une fois par
+  // élément. Le doublon rapproché est filtré côté Rust, donc revenir sur un
+  // chant pendant le culte ne le compte pas deux fois.
+  useEffect(() => {
+    if (!isLiveActive || isBaseScreenProjected || !projectedSong?.title) return;
+    invoke('record_projection', {
+      kind: projectedSong.type || liveCategory || 'agenda',
+      title: projectedSong.title,
+      number: projectedSong.number != null ? String(projectedSong.number) : null,
+      book: projectedSong.book || null,
+    }).catch((e) => console.warn('record_projection', e));
+  }, [isLiveActive, isBaseScreenProjected, projectedSong?.id, projectedSong?.title]);
 
   useEffect(() => {
     let unlisten: any;
@@ -634,7 +726,7 @@ function App() {
             setActiveSong(song);
             let startIdx = 0;
             if (song.startVerse) {
-              const verses = song.lyrics?.split(/\n\s*\n/) || [];
+              const verses = getSlides(song);
               const foundIdx = verses.findIndex((v: string) => v.trim().startsWith(song.startVerse));
               if (foundIdx !== -1) startIdx = foundIdx;
             }

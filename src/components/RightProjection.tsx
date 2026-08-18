@@ -2,6 +2,11 @@ import { useState, useEffect, useRef } from 'react';
 import { Star, AlertCircle, Presentation, MonitorOff, Headphones, Youtube, Globe, FileText, Camera, ChevronLeft, ChevronRight } from 'lucide-react';
 import { cleanUrl } from '../lib/media';
 import { PdfViewer } from './PdfViewer';
+import { MarkdownView } from './MarkdownView';
+import { getSlides } from '../lib/slides';
+import { NEXT_KEYS, PREV_KEYS, isTypingTarget } from '../lib/keys';
+import { BackgroundVideo } from './BackgroundVideo';
+import { ProjectedVideo } from './ProjectedVideo';
 
 export function RightProjection({ 
   activeSong, projectedSong, projectedVerseIdx, bgImage, textSettings, 
@@ -18,7 +23,7 @@ export function RightProjection({
   };
   const [projectedLines, setProjectedLines] = useState<string[]>([]);
   const previewVideoRef = useRef<HTMLVideoElement>(null);
-  const verses = activeSong?.lyrics?.split(/\n\s*\n/) || [];
+  const verses = activeSong ? getSlides(activeSong) : [];
 
   useEffect(() => {
     if (activeSong) {
@@ -38,7 +43,7 @@ export function RightProjection({
   
   useEffect(() => {
     if (projectedSong) {
-      const pVerses = projectedSong.lyrics?.split(/\n\s*\n/) || [];
+      const pVerses = getSlides(projectedSong);
       const lines = pVerses[projectedVerseIdx]?.split('\n') || [];
       setProjectedLines(lines);
     } else {
@@ -59,14 +64,19 @@ export function RightProjection({
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!verses || verses.length === 0) return;
-      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      // On ignore la frappe si l'utilisateur écrit dans un champ.
+      if (isTypingTarget(e.target)) return;
+
+      const isNext = NEXT_KEYS.includes(e.key);
+      const isPrev = PREV_KEYS.includes(e.key);
+      if (isNext || isPrev) {
         e.preventDefault();
         let newIdx = activeVerseIdx;
-        if (e.key === 'ArrowUp' && activeVerseIdx > 0) newIdx--;
-        if (e.key === 'ArrowDown' && activeVerseIdx < verses.length - 1) newIdx++;
-        
-        // ← FIN DE PRÉSENTATION: si on est au dernier verset et on appuie sur Bas → retour à l'écran de base
-        if (e.key === 'ArrowDown' && activeVerseIdx === verses.length - 1 && !isBaseScreenProjected) {
+        if (isPrev && activeVerseIdx > 0) newIdx--;
+        if (isNext && activeVerseIdx < verses.length - 1) newIdx++;
+
+        // ← FIN DE PRÉSENTATION: si on est au dernier verset et on avance → retour à l'écran de base
+        if (isNext && activeVerseIdx === verses.length - 1 && !isBaseScreenProjected) {
           setIsBaseScreenProjected(true);
           return;
         }
@@ -207,7 +217,7 @@ export function RightProjection({
          {/* Background — always visible (same as LiveView) */}
          <div className="absolute inset-0 z-0">
             {bgImage?.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i) ? (
-               <video key={bgImage} src={cleanUrl(bgImage)} autoPlay loop muted playsInline preload="auto" className="w-full h-full object-cover" style={{ display: 'block' }} onCanPlay={(e) => e.currentTarget.play().catch(() => {})} />
+               <BackgroundVideo src={cleanUrl(bgImage)!} label="Fond aperçu" />
             ) : bgImage ? (
                <img src={cleanUrl(bgImage)} className="w-full h-full object-cover" alt="Background" />
             ) : (
@@ -232,10 +242,17 @@ export function RightProjection({
          {/* Content overlay — only when projecting */}
          {!isBaseScreenProjected && projectedSong && (
             <div className="absolute inset-0 flex items-center justify-center flex-col p-4 z-20">
-               {['image', 'video', 'document', 'audio', 'youtube', 'link'].includes(projectedSong.type) ? (
+               {projectedSong.type === 'markdown' ? (
+                  /* Aperçu fidèle : la diapo Markdown est rendue comme à l'écran. */
+                  <div className="absolute inset-0 z-20 overflow-hidden bg-black/40 p-3">
+                     <div className="h-full overflow-y-auto text-white">
+                        <MarkdownView content={getSlides(projectedSong)[projectedVerseIdx] || ''} variant="preview" />
+                     </div>
+                  </div>
+               ) : ['image', 'video', 'document', 'audio', 'youtube', 'link'].includes(projectedSong.type) ? (
                   <div className="w-full h-full flex items-center justify-center z-20 absolute inset-0 bg-black">
                      {projectedSong.type === 'image' && <img src={cleanUrl(projectedSong.lyrics)} className="w-full h-full object-contain" alt="Media" />}
-                     {projectedSong.type === 'video' && <video key={projectedSong.lyrics} src={cleanUrl(projectedSong.lyrics)} className="w-full h-full object-contain" autoPlay muted playsInline preload="auto" style={{ display: 'block' }} onCanPlay={(e) => e.currentTarget.play().catch(() => {})} />}
+                     {projectedSong.type === 'video' && <ProjectedVideo src={cleanUrl(projectedSong.lyrics)!} controls={false} muted label="Aperçu vidéo" />}
                      {projectedSong.type === 'audio' && (
                        <div className="flex flex-col items-center gap-1">
                           <Headphones size={16} className="text-green-400 animate-pulse" />

@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { Save, FolderOpen, X, BookOpen, Music, Search as SearchIcon, List, Download, Plus, Trash2, ChevronUp, ChevronDown, FileText, Image as ImageIcon, Video, Type, Settings, Heart, Headphones, Youtube, Globe } from 'lucide-react';
-import { Store } from './Store';
+import { Save, FolderOpen, X, BookOpen, Music, Search as SearchIcon, List, Download, Plus, Trash2, ChevronUp, ChevronDown, FileText, Image as ImageIcon, Video, Type, Library as LibraryIcon, Heart, Headphones, Youtube, Globe, FileCode } from 'lucide-react';
+import { Library } from './library/Library';
 import Fuse from 'fuse.js';
 import { invoke } from '@tauri-apps/api/core';
 
 export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoading, onLoadDb, activeSong, searchFocusTrigger, favoriteDbs, toggleFavoriteDb }: any) {
   const searchRef = useRef<HTMLInputElement>(null);
-  const [view, setView] = useState('chant'); // 'chant' | 'bible' | 'store' | 'settings'
+  const [view, setView] = useState('chant'); // 'chant' | 'bible' | 'store'
   const [hymneSearchTerm, setHymneSearchTerm] = useState('');
   const [bibleSearchTerm, setBibleSearchTerm] = useState('');
   const searchTerm = view === 'chant' ? hymneSearchTerm : bibleSearchTerm;
@@ -22,7 +22,7 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
 
   useEffect(() => {
     if (searchFocusTrigger > 0) {
-      if (view === 'settings' || view === 'store') setView('chant');
+      if (view === 'store') setView('chant');
       setTimeout(() => searchRef.current?.focus(), 50);
     }
   }, [searchFocusTrigger]);
@@ -32,7 +32,7 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
     const handleGlobalKeys = (e: KeyboardEvent) => {
        if (e.altKey && e.key === '1') { e.preventDefault(); setView('chant'); }
        if (e.altKey && e.key === '2') { e.preventDefault(); setView('bible'); }
-       if (e.altKey && e.key === '3') { e.preventDefault(); setView('settings'); }
+       if (e.altKey && e.key === '3') { e.preventDefault(); setView('store'); }
     };
     window.addEventListener('keydown', handleGlobalKeys);
     return () => window.removeEventListener('keydown', handleGlobalKeys);
@@ -40,7 +40,7 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
 
   useEffect(() => {
     async function fetchDbs() {
-      if (view === 'store' || view === 'settings') return;
+      if (view === 'store') return;
       try {
         const category = view === 'chant' ? 'hymnes' : 'bible';
         const result = await invoke<string[]>("list_dbs", { category });
@@ -65,11 +65,33 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
     fetchDbs();
   }, [view, favoriteDbs]);
 
-  const fuse = useMemo(() => new Fuse(songs, {
-    keys: ['title', 'number', 'book'],
+  // "1Jao", "1 Jaona", "1jao." doivent tous mener au même livre : on compare
+  // des formes normalisées (sans accents, sans espaces, sans ponctuation).
+  const normalize = (v: any) =>
+    String(v ?? '')
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]/g, '');
+
+  // Fuse ne trouvait pas "1Jao 3" car le titre indexé s'écrit "1 Jaona 3".
+  // On indexe donc aussi une version compacte du titre et l'abréviation
+  // officielle du livre (books.short_name).
+  const searchIndex = useMemo(
+    () => songs.map((s: any) => ({
+      ...s,
+      _compact: normalize(s.title),
+      _abbr: normalize(s.abbr),
+      _abbrNum: `${normalize(s.abbr)}${normalize(s.number)}`,
+    })),
+    [songs]
+  );
+
+  const fuse = useMemo(() => new Fuse(searchIndex, {
+    keys: ['title', 'number', 'book', '_compact', '_abbr', '_abbrNum'],
     threshold: 0.3,
     ignoreLocation: true // match anywhere in the title (faster + better for long titles)
-  }), [songs]);
+  }), [searchIndex]);
 
   const searchResults = useMemo(() => searchTerm
       ? fuse.search(searchTerm, { limit: 200 }).map(result => result.item)
@@ -107,10 +129,25 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
 
   useEffect(() => {
     if (view === 'bible' && searchTerm.trim()) {
-      const match = searchTerm.match(/^([a-zA-Z0-9éèêâîôû]+)\.?\s*(\d+)[:\.\s]*(\d+)?(?:-?(\d+))?/i);
+      // Le nom du livre peut commencer par un chiffre ET contenir une espace
+      // ("1 Jaona"), ou être collé ("1Jao"). L'ancien motif exigeait des
+      // caractères contigus, donc aucune référence en 1/2/3 ne fonctionnait.
+      const match = searchTerm.match(
+        /^\s*(\d?\s*[^\d\s.:,;]+)\s*[.\s]*(\d+)\s*[:.\s]*(\d+)?\s*-?\s*(\d+)?/i
+      );
       if (match) {
         const [, bookAlias, chapter, vStart, vEnd] = match;
-        const bookNameStr = bibleBooks.find((b:any) => b.toLowerCase().startsWith(bookAlias.toLowerCase()));
+        const alias = normalize(bookAlias);
+        // On accepte le nom complet comme l'abréviation, dans les deux sens :
+        // "1jao" doit trouver "1 Jaona", et "1jaona" doit trouver l'abrégé "1jao".
+        const bookNameStr = alias
+          ? bibleBooks.find((b: any) => normalize(b).startsWith(alias)) ||
+            bibleBooks.find((b: any) => {
+              const song = songs.find((x: any) => x.book === b && x.abbr);
+              const abbr = normalize(song?.abbr);
+              return abbr && (abbr.startsWith(alias) || alias.startsWith(abbr));
+            })
+          : undefined;
         if (bookNameStr) {
           if (selectedBook !== bookNameStr) setSelectedBook(bookNameStr as string);
           if (selectedChapter !== chapter) setSelectedChapter(chapter);
@@ -159,6 +196,94 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
     const newItem = { id: Date.now().toString(), title: "Programme Libre", number: "📝", lyrics: "Entrez votre texte ici...", type: "custom" };
     setPlaylist([...playlist, newItem]);
     onSelectSong(newItem, 'agenda');
+  };
+
+  const MARKDOWN_TEMPLATE = `# Titre de la présentation
+
+Texte en **gras**, en *italique*, et une liste :
+
+- premier point
+- deuxième point
+
+---
+
+## Deuxième diapo
+
+> Une citation mise en avant.
+
+| Colonne A | Colonne B |
+| --------- | --------- |
+| valeur    | valeur    |
+`;
+
+  const addMarkdownItem = () => {
+    const newItem = {
+      id: Date.now().toString(),
+      title: "Présentation Markdown",
+      number: "📑",
+      lyrics: MARKDOWN_TEMPLATE,
+      type: "markdown",
+    };
+    setPlaylist([...playlist, newItem]);
+    onSelectSong(newItem, 'agenda');
+  };
+
+  /**
+   * Importe un .md : on stocke le TEXTE, pas le chemin, pour que l'agenda
+   * reste autonome (un agenda enregistré reste lisible si le fichier bouge).
+   */
+  const importMarkdownItem = async () => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const file = await open({
+        multiple: false,
+        filters: [{ name: 'Markdown', extensions: ['md', 'markdown', 'mdx'] }],
+      });
+      if (file && typeof file === 'string') {
+        const content: string = await invoke('read_text_file', { path: file });
+        const filename = file.split(/[/\\]/).pop() || 'Markdown';
+        const newItem = {
+          id: Date.now().toString(),
+          title: filename.replace(/\.(md|markdown|mdx)$/i, ''),
+          number: '📑',
+          lyrics: content,
+          type: 'markdown',
+        };
+        setPlaylist([...playlist, newItem]);
+        onSelectSong(newItem, 'agenda');
+      }
+    } catch (e) {
+      console.error('importMarkdownItem error:', e);
+      alert('Import Markdown impossible : ' + e);
+    }
+  };
+
+  /**
+   * Ajoute à l'agenda le playback du cantique sélectionné.
+   * Si l'audio a été téléchargé depuis la bibliothèque il est lu hors ligne ;
+   * sinon on utilise directement le flux en ligne, sans rien installer.
+   */
+  const addHymnAudio = async (e: any, item: any) => {
+    e.stopPropagation();
+    try {
+      const { resolveHymnAudio, hymnAudioSource } = await import('../lib/library');
+      const track = await resolveHymnAudio(item.playback, item.number);
+      if (!track) {
+        alert(`Aucun playback trouvé pour le cantique ${item.number}.`);
+        return;
+      }
+      const { src, offline } = await hymnAudioSource(item.playback, track);
+      setPlaylist([...playlist, {
+        id: Date.now().toString(),
+        title: `♪ ${item.title}${offline ? '' : ' (en ligne)'}`,
+        number: '🎵',
+        lyrics: src,
+        type: 'audio',
+      }]);
+    } catch (err) {
+      console.error('addHymnAudio', err);
+      alert('Playback indisponible : ' + err);
+    }
   };
 
   const addMediaItem = async (type: 'image' | 'video') => {
@@ -272,11 +397,16 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
             }
             // Only delete if it's a local file (not a URL or youtube)
             if (!lyricsPath.startsWith('http') && !lyricsPath.startsWith('blob:') && !lyricsPath.startsWith('data:')) {
-              await invoke('delete_media', { file_path: absolutePath }).catch((err: any) => console.warn("File delete warning:", err));
+              // ATTENTION : Tauri v2 attend les paramètres en camelCase.
+              // Avec `file_path`, l'appel échouait à chaque fois et le fichier
+              // restait sur le disque — l'erreur était avalée par un warning.
+              await invoke('delete_media', { filePath: absolutePath });
             }
           }
         } catch (err) {
+          // On informe : un échec silencieux laissait le disque se remplir.
           console.error('Delete media error:', err);
+          alert(`Le fichier n'a pas pu être supprimé du disque :\n${err}\n\nL'élément est retiré de l'agenda.`);
         }
         const newList = [...playlist];
         newList.splice(index, 1);
@@ -328,6 +458,8 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
                <div className="absolute top-full right-0 mt-1 w-48 bg-[#2b2d31] border border-[#36393f] rounded shadow-xl z-50 py-1">
                  <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addToAgenda(); setShowAddMenu(false); }}><Music size={12} /> Sélection</button>
                  <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addCustomItem(); setShowAddMenu(false); }}><Type size={12} /> Libre</button>
+                  <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addMarkdownItem(); setShowAddMenu(false); }}><FileCode size={12} /> Markdown</button>
+                  <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { importMarkdownItem(); setShowAddMenu(false); }}><FileCode size={12} /> Importer un .md</button>
                   <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addMediaItem('image'); setShowAddMenu(false); }}><ImageIcon size={12} /> Image</button>
                   <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addMediaItem('video'); setShowAddMenu(false); }}><Video size={12} /> Vidéo</button>
                   <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addAudioItem(); setShowAddMenu(false); }}><Headphones size={12} /> Audio</button>
@@ -355,10 +487,18 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
             {item.type === 'link' && <Globe size={12} className="text-blue-400 shrink-0" />}
             {item.type === 'document' && <FileText size={12} className="text-orange-400 shrink-0" />}
             {item.type === 'custom' && <Type size={12} className="text-yellow-400 shrink-0" />}
+            {item.type === 'markdown' && <FileCode size={12} className="text-cyan-400 shrink-0" />}
             {(!item.type || item.type === 'bible' || item.type === 'hymnes') && <Music size={12} className="text-[#5865f2] shrink-0" />}
             <span className="text-gray-400 w-8 shrink-0">{item.number}</span>
             <span className="text-gray-200 truncate flex-1">{item.title}</span>
             <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
+              {item.playback && (
+                <button
+                  className="p-1 hover:bg-emerald-500/20 rounded text-gray-400 hover:text-emerald-400"
+                  title="Ajouter le playback de ce cantique"
+                  onClick={(e) => addHymnAudio(e, item)}
+                ><Headphones size={12} /></button>
+              )}
               <button 
                 className="p-1 hover:bg-[#2b2d31] rounded text-gray-400 hover:text-white"
                 onClick={(e) => moveAgendaItem(e, idx, 'up')}
@@ -385,55 +525,21 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
           <button className={`flex-1 py-2 font-bold border-b-2 transition flex items-center justify-center gap-1.5 ${view === 'bible' ? 'border-[#5865f2] text-white' : 'border-transparent text-gray-500 hover:text-gray-300'}`} onClick={() => setView('bible')}>
              <BookOpen size={14} /> Bibles
           </button>
-          <button className={`flex-1 py-2 font-bold border-b-2 transition flex items-center justify-center gap-1.5 ${view === 'settings' ? 'border-[#5865f2] text-white' : 'border-transparent text-gray-500 hover:text-gray-300'}`} onClick={() => setView('settings')}>
-             <Settings size={14} /> Params
+          <button className={`flex-1 py-2 font-bold border-b-2 transition flex items-center justify-center gap-1.5 ${view === 'store' ? 'border-[#5865f2] text-white' : 'border-transparent text-gray-500 hover:text-gray-300'}`} onClick={() => setView('store')} title="Recueils, bibles, documents, audio, raccourcis…">
+             <LibraryIcon size={14} /> Bibliothèque
           </button>
         </div>
         
-        {view === 'store' && <Store onInstalled={() => setView('chant')} onLoadDb={onLoadDb} />}
-        
-        {view === 'settings' && (
-          <div className="flex-1 overflow-y-auto p-4 text-xs text-gray-300 space-y-4">
-             <h2 className="text-white text-sm font-bold border-b border-[#36393f] pb-2">Paramètres</h2>
-             <div>
-                <h3 className="font-bold text-[#5865f2] mb-1">Raccourcis</h3>
-                   <ul className="list-disc pl-4 opacity-80">
-                      <li>Alt+1/2/3 : Changer de Vue</li>
-                      <li>Alt+S : Rechercher un Chant</li>
-                      <li>Alt+B : Écran de Base (Accueil)</li>
-                      <li>Alt+P : Lancer 1er Agenda</li>
-                      <li>Alt+L : Activer/Off LIVE</li>
-                      <li>Alt+H : Cacher le Contenu</li>
-                      <li><b>Alt+N</b> : Écran Noir</li>
-                      <li><b>Alt+W</b> : Écran Blanc</li>
-                      <li><b>Alt+R</b> : Réveil (Enlever overlay)</li>
-                      <li><b>Alt+C</b> : Toggle Horloge</li>
-                      <li><b>Alt+M</b> : Toggle Message Défilant</li>
-                      <li>Alt+Enter : PROJETER sélection</li>
-                      <li>Haut/Bas : Changer Diapo</li>
-                      <li className="text-green-400"><b>↓ (fin de chant)</b> : Retour Écran de Base</li>
-                   </ul>
-             </div>
-             <div>
-                <h3 className="font-bold text-[#5865f2] mb-1">Caméra Virtuelle (DroidCam)</h3>
-                <ul className="list-disc pl-4 opacity-80 space-y-0.5">
-                   <li>Lancez DroidCam <b>avant</b> d'activer</li>
-                   <li>Cliquez <b>Caméra</b> dans la barre d'outils</li>
-                   <li>Si non détecté: cliquez <b>⟳ Rafraîchir</b></li>
-                </ul>
-             </div>
-             <div>
-                <h3 className="font-bold text-[#5865f2] mb-1">Support Fichiers</h3>
-                <ul className="list-disc pl-4 opacity-80">
-                   <li>Docs: PDF, TXT, MD</li>
-                   <li>Office: Convertir en PDF</li>
-                   <li>Média: Images, Vidéos, Audio</li>
-                </ul>
-             </div>
-          </div>
+        {view === 'store' && (
+          <Library
+            onClose={() => setView('chant')}
+            onLoadDb={onLoadDb}
+            onAddToPlaylist={(item: any) => setPlaylist([...playlist, item])}
+          />
         )}
+        
 
-        {(view !== 'store' && view !== 'settings') && (
+        {view !== 'store' && (
            <>
               <div className="p-2 border-b border-[#202225] flex flex-col gap-2">
                 <div className="flex gap-1.5 items-center">
@@ -455,7 +561,7 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
                       <Heart size={14} fill={favoriteDbs[view === 'chant' ? 'hymnes' : 'bible'] === activeDb ? "currentColor" : "none"} />
                     </button>
                   )}
-                  <button className="bg-[#5865f2] p-1.5 rounded hover:bg-[#4752c4] transition" title="Télécharger des modules" onClick={() => setView('store')}><Download size={14} /></button>
+                  <button className="bg-[#5865f2] p-1.5 rounded hover:bg-[#4752c4] transition" title="Ouvrir la bibliothèque (recueils, bibles, documents, Mofon'aina, audio)" onClick={() => setView('store')}><Download size={14} /></button>
                 </div>
                 <div className="relative">
                   <SearchIcon className="absolute left-2 top-2 text-gray-400" size={14} />
