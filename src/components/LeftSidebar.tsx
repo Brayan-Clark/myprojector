@@ -19,6 +19,15 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
   const [showAddMenu, setShowAddMenu] = useState(false);
   // Custom confirm dialog state (replaces window.confirm which doesn't work in Tauri/WebKit)
   const [confirmDialog, setConfirmDialog] = useState<{ message: string; onConfirm: () => void } | null>(null);
+  // Idem pour la saisie : window.prompt() ne fonctionne pas non plus sous
+  // WebKitGTK — il renvoyait toujours null, donc l'ajout d'un lien YouTube ou
+  // web ne se produisait jamais.
+  const [promptDialog, setPromptDialog] = useState<{
+    title: string; placeholder: string; hint?: string;
+    onSubmit: (value: string) => void;
+  } | null>(null);
+  const [promptValue, setPromptValue] = useState('');
+  const [promptError, setPromptError] = useState<string | null>(null);
 
   useEffect(() => {
     if (searchFocusTrigger > 0) {
@@ -335,31 +344,67 @@ Texte en **gras**, en *italique*, et une liste :
     } catch(e) { console.error('addAudioItem error:', e); alert('Erreur: ' + e); }
   };
 
-  const addYoutubeItem = async () => {
-    try {
-      const url = window.prompt('Entrez l\'URL YouTube');
-      if (url) {
-        // Extract video ID if possible
-        let videoId = url;
-        const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
-        const match = url.match(regExp);
-        if (match && match[2].length === 11) {
-          videoId = match[2];
-        }
-        const newItem = { id: Date.now().toString(), title: "YouTube Video", number: '📺', lyrics: videoId, type: 'youtube' };
-        setPlaylist([...playlist, newItem]);
-      }
-    } catch(e) { console.error(e) }
+  /**
+   * Extrait l'identifiant d'une vidéo YouTube.
+   * Couvre les formes réellement rencontrées : watch?v=, youtu.be/, /embed/,
+   * /live/ et /shorts/. Renvoie null si rien n'est reconnaissable — mieux vaut
+   * le dire que d'enregistrer une URL entière qui ne s'affichera jamais.
+   */
+  const extractYoutubeId = (input: string): string | null => {
+    const url = input.trim();
+    if (/^[A-Za-z0-9_-]{11}$/.test(url)) return url; // déjà un identifiant
+    const patterns = [
+      /[?&]v=([A-Za-z0-9_-]{11})/,
+      /youtu\.be\/([A-Za-z0-9_-]{11})/,
+      /\/embed\/([A-Za-z0-9_-]{11})/,
+      /\/live\/([A-Za-z0-9_-]{11})/,
+      /\/shorts\/([A-Za-z0-9_-]{11})/,
+    ];
+    for (const re of patterns) {
+      const m = url.match(re);
+      if (m) return m[1];
+    }
+    return null;
   };
 
-  const addLinkItem = async () => {
-    try {
-      const url = window.prompt('Entrez l\'URL Web');
-      if (url) {
+  const addYoutubeItem = () => {
+    setPromptValue('');
+    setPromptError(null);
+    setPromptDialog({
+      title: 'Ajouter une vidéo YouTube',
+      placeholder: 'https://www.youtube.com/watch?v=…',
+      hint: "Collez l'adresse de la vidéo. Les formats youtu.be, /live/ et /shorts/ sont reconnus.",
+      onSubmit: (value) => {
+        const videoId = extractYoutubeId(value);
+        if (!videoId) {
+          setPromptError("Adresse YouTube non reconnue : impossible d'y trouver un identifiant de vidéo.");
+          return;
+        }
+        const newItem = { id: Date.now().toString(), title: 'Vidéo YouTube', number: '📺', lyrics: videoId, type: 'youtube' };
+        setPlaylist([...playlist, newItem]);
+        setPromptDialog(null);
+      },
+    });
+  };
+
+  const addLinkItem = () => {
+    setPromptValue('');
+    setPromptError(null);
+    setPromptDialog({
+      title: 'Ajouter un lien web',
+      placeholder: 'https://exemple.org',
+      hint: "Certains sites refusent d'être affichés dans une autre page ; dans ce cas l'écran restera vide.",
+      onSubmit: (value) => {
+        let url = value.trim();
+        if (!url) return;
+        // Sans schéma, l'iframe interprète l'adresse comme un chemin local et
+        // n'affiche rien.
+        if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
         const newItem = { id: Date.now().toString(), title: url, number: '🌐', lyrics: url, type: 'link' };
         setPlaylist([...playlist, newItem]);
-      }
-    } catch(e) { console.error(e) }
+        setPromptDialog(null);
+      },
+    });
   };
 
   const moveAgendaItem = (e: any, index: number, dir: 'up'|'down') => {
@@ -418,6 +463,55 @@ Texte en **gras**, en *italique*, et une liste :
   return (
     <div className="w-80 bg-[#202225] h-full flex flex-col border-r border-[#18191c]">
       {/* Custom Confirmation Modal Dialog */}
+      {promptDialog && (
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center p-4"
+          style={{ backgroundColor: 'rgba(0,0,0,0.7)' }}
+          onClick={() => setPromptDialog(null)}
+        >
+          <div
+            className="bg-[#2b2d31] border border-[#36393f] rounded-lg shadow-2xl p-6 max-w-md w-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-white font-bold text-sm mb-3">{promptDialog.title}</h3>
+            <input
+              autoFocus
+              type="text"
+              value={promptValue}
+              placeholder={promptDialog.placeholder}
+              onChange={(e) => { setPromptValue(e.target.value); setPromptError(null); }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') promptDialog.onSubmit(promptValue);
+                if (e.key === 'Escape') setPromptDialog(null);
+              }}
+              className="w-full bg-[#18191c] text-gray-100 text-sm rounded px-3 py-2 outline-none ring-1 ring-[#5865f2] placeholder:text-gray-600"
+            />
+            {promptDialog.hint && (
+              <p className="mt-2 text-[11px] leading-relaxed text-gray-500">{promptDialog.hint}</p>
+            )}
+            {promptError && (
+              <p className="mt-2 rounded border border-red-500/20 bg-red-500/10 p-2 text-[11px] text-red-400">
+                {promptError}
+              </p>
+            )}
+            <div className="flex justify-end gap-2 mt-5">
+              <button
+                className="px-4 py-2 text-xs font-bold text-gray-300 hover:text-white bg-[#36393f] hover:bg-[#4f545c] rounded transition"
+                onClick={() => setPromptDialog(null)}
+              >
+                Annuler
+              </button>
+              <button
+                className="px-4 py-2 text-xs font-bold text-white bg-[#5865f2] hover:bg-[#4752c4] rounded transition"
+                onClick={() => promptDialog.onSubmit(promptValue)}
+              >
+                Ajouter
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {confirmDialog && (
         <div className="fixed inset-0 z-[9999] flex items-center justify-center" style={{ backgroundColor: 'rgba(0,0,0,0.7)' }}>
           <div className="bg-[#2b2d31] border border-[#36393f] rounded-lg shadow-2xl p-6 max-w-sm w-full mx-4">

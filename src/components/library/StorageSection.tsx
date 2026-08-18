@@ -48,7 +48,15 @@ export function StorageSection() {
 
   /** Supprime un média importé. La confirmation évite tout geste irréversible par erreur. */
   const deleteMedia = async (file: LibraryFile) => {
-    if (!window.confirm(`Supprimer définitivement « ${file.filename} » (${formatBytes(file.size)}) ?\n\nSi un agenda enregistré l'utilise, il ne s'affichera plus.`)) return;
+    // window.confirm() ne fonctionne pas sous WebKitGTK : il renvoie toujours
+    // false, donc la suppression n'avait jamais lieu. On passe par le dialogue
+    // natif du plugin.
+    const { confirm } = await import("@tauri-apps/plugin-dialog");
+    const ok = await confirm(
+      `Supprimer définitivement « ${file.filename} » (${formatBytes(file.size)}) ?\n\nSi un agenda enregistré l'utilise, il ne s'affichera plus.`,
+      { title: "Supprimer un média", kind: "warning" }
+    );
+    if (!ok) return;
     setBusy(file.path);
     try {
       await invoke("delete_media", { filePath: file.path });

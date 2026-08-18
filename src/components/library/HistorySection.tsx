@@ -44,7 +44,12 @@ export function HistorySection({ search }: { search: string }) {
   useEffect(() => { load(); }, [load]);
 
   const clear = async () => {
-    if (!window.confirm("Effacer tout l'historique des projections ?")) return;
+    // Dialogue natif : window.confirm() est inopérant sous WebKitGTK.
+    const { confirm } = await import("@tauri-apps/plugin-dialog");
+    const ok = await confirm("Effacer tout l'historique des projections ?", {
+      title: "Effacer l'historique", kind: "warning",
+    });
+    if (!ok) return;
     try {
       await invoke("history_clear");
       await load();
