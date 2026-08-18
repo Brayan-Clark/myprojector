@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, Music, Pause, Play, Plus, Wifi } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { ArrowLeft, DownloadCloud, Music, Pause, Play, Plus, Wifi, X } from "lucide-react";
 import {
-  fetchPlaybackCollections, fetchPlaybackTracks, listInstalled, trackFileName,
+  fetchPlaybackCollections, fetchPlaybackTracks, formatBytes, listInstalled, trackFileName,
   type PlaybackCollection, type PlaybackTrack,
 } from "../../lib/library";
 import { cleanUrl } from "../../lib/media";
@@ -74,7 +76,13 @@ function TrackList({ collection, search, onBack, onAddToPlaylist }: {
   const [playing, setPlaying] = useState<string | null>(null);
   const [playError, setPlayError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const { installed, progress, failed, download, remove } = useLibraryDownloads("audio", collection.id);
+  const { installed, progress, failed, download, remove, refresh } = useLibraryDownloads("audio", collection.id);
+
+  // Téléchargement groupé du recueil entier.
+  const [batch, setBatch] = useState<{
+    done: number; total: number; failed: number; bytes: number; current: string;
+  } | null>(null);
+  const [batchResult, setBatchResult] = useState<string | null>(null);
 
   const load = () => {
     setError(null);
@@ -99,6 +107,55 @@ function TrackList({ collection, search, onBack, onAddToPlaylist }: {
       audioRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    listen<{ done: number; total: number; skipped: number; failed: number; bytes: number; current: string }>(
+      "batch_download_progress",
+      (e) => setBatch(e.payload)
+    ).then((u) => { un = u; });
+    return () => { if (un) un(); };
+  }, []);
+
+  const downloadAll = async () => {
+    if (!tracks) return;
+    const pending = tracks.filter((t) => !installed.has(trackFileName(t)));
+    if (pending.length === 0) return;
+
+    const { confirm } = await import("@tauri-apps/plugin-dialog");
+    const ok = await confirm(
+      `Télécharger ${pending.length} pistes de « ${collection.title} » ?\n\n` +
+      `Cela peut prendre du temps et occuper plusieurs centaines de Mo. ` +
+      `Tu peux interrompre à tout moment : les pistes déjà reçues sont conservées.`,
+      { title: "Télécharger tout le recueil", kind: "info" }
+    );
+    if (!ok) return;
+
+    setBatchResult(null);
+    setBatch({ done: 0, total: pending.length, failed: 0, bytes: 0, current: "" });
+    try {
+      const summary = await invoke<{ downloaded: number; skipped: number; failed: number; bytes: number; cancelled: boolean }>(
+        "download_batch",
+        {
+          kind: "audio",
+          collection: collection.id,
+          items: pending.map((t) => ({ url: t.url, filename: trackFileName(t) })),
+        }
+      );
+      setBatchResult(
+        `${summary.cancelled ? "Interrompu — " : ""}${summary.downloaded} piste(s) téléchargée(s) · ` +
+        `${formatBytes(summary.bytes)}` +
+        (summary.failed > 0 ? ` · ${summary.failed} échec(s)` : "")
+      );
+    } catch (e) {
+      setBatchResult(`Échec du lot : ${e}`);
+    } finally {
+      setBatch(null);
+      await refresh();
+    }
+  };
+
+  const cancelBatch = () => { invoke("cancel_batch_download").catch(() => null); };
 
   const localPathOf = async (filename: string) => {
     const files = await listInstalled("audio", collection.id);
@@ -191,10 +248,54 @@ function TrackList({ collection, search, onBack, onAddToPlaylist }: {
         </div>
       </div>
 
-      <p className="flex items-center gap-2 rounded border border-white/5 bg-[#1e1f22] px-3 py-2 text-[11px] text-gray-400">
-        <Wifi size={13} className="text-[#5865f2]" />
-        Lecture directe en ligne. Télécharge une piste pour l'utiliser sans connexion pendant le culte.
-      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="flex flex-1 items-center gap-2 rounded border border-white/5 bg-[#1e1f22] px-3 py-2 text-[11px] text-gray-400">
+          <Wifi size={13} className="text-[#5865f2]" />
+          Lecture directe en ligne. Télécharge une piste pour l'utiliser sans connexion pendant le culte.
+        </p>
+        {batch === null && tracks.length > installed.size && (
+          <button
+            onClick={downloadAll}
+            className="flex shrink-0 items-center gap-2 rounded bg-[#5865f2] px-3 py-2 text-[11px] font-bold text-white transition hover:bg-[#4752c4]"
+          >
+            <DownloadCloud size={14} />
+            Tout télécharger ({tracks.length - installed.size})
+          </button>
+        )}
+      </div>
+
+      {batch && (
+        <div className="rounded-lg border border-[#5865f2]/30 bg-[#5865f2]/[0.07] p-3">
+          <div className="flex items-center gap-3">
+            <div className="min-w-0 flex-1">
+              <p className="text-[11px] font-bold text-gray-100">
+                Téléchargement {batch.done} / {batch.total}
+                <span className="ml-2 font-normal text-gray-400">{formatBytes(batch.bytes)}</span>
+                {batch.failed > 0 && <span className="ml-2 text-amber-400">{batch.failed} échec(s)</span>}
+              </p>
+              <p className="truncate text-[10px] text-gray-500">{batch.current}</p>
+            </div>
+            <button
+              onClick={cancelBatch}
+              className="flex shrink-0 items-center gap-1 rounded border border-white/15 px-2.5 py-1.5 text-[10px] font-bold text-gray-300 transition hover:border-red-500/50 hover:text-red-400"
+            >
+              <X size={11} /> Arrêter
+            </button>
+          </div>
+          <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+            <div
+              className="h-full bg-[#5865f2] transition-[width] duration-200"
+              style={{ width: `${batch.total ? (batch.done / batch.total) * 100 : 0}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {batchResult && (
+        <p className="rounded border border-emerald-500/25 bg-emerald-500/10 p-2.5 text-[11px] font-semibold text-emerald-400">
+          {batchResult}
+        </p>
+      )}
 
       {playError && <p className="rounded border border-red-500/20 bg-red-500/10 p-2.5 text-[11px] text-red-400">{playError}</p>}
 

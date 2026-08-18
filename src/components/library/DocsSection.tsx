@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { ExternalLink, FileText, Plus } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { DownloadCloud, ExternalLink, FileText, Plus, X } from "lucide-react";
 import {
-  docFileName, fetchDocsManifest,
+  docFileName, fetchDocsManifest, formatBytes,
   type DocsManifest, type DocItem,
 } from "../../lib/library";
 import { useLibraryDownloads } from "./useLibrary";
@@ -17,7 +19,20 @@ export function DocsSection({ search, onAddToPlaylist }: {
   const [error, setError] = useState<string | null>(null);
   const [category, setCategory] = useState<string>("all");
   const [department, setDepartment] = useState<string>("all");
-  const { installed, progress, failed, download, remove } = useLibraryDownloads("docs");
+  const { installed, progress, failed, download, remove, refresh } = useLibraryDownloads("docs");
+
+  // Téléchargement groupé de la sélection affichée.
+  const [batch, setBatch] = useState<{ done: number; total: number; failed: number; bytes: number; current: string } | null>(null);
+  const [batchResult, setBatchResult] = useState<string | null>(null);
+
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    listen<{ done: number; total: number; skipped: number; failed: number; bytes: number; current: string }>(
+      "batch_download_progress",
+      (e) => setBatch(e.payload)
+    ).then((u) => { un = u; });
+    return () => { if (un) un(); };
+  }, []);
 
   const load = () => {
     setError(null);
@@ -45,6 +60,51 @@ export function DocsSection({ search, onAddToPlaylist }: {
       return true;
     });
   }, [manifest, search, category, department]);
+
+  // Ce qui reste à prendre dans la vue courante : le lot suit exactement les
+  // filtres affichés, pour ne jamais télécharger plus que ce que tu vois.
+  const pending = useMemo(
+    () => documents.filter((d) => !installed.has(docFileName(d))),
+    [documents, installed]
+  );
+
+  const downloadAll = async () => {
+    if (pending.length === 0) return;
+    const { confirm } = await import("@tauri-apps/plugin-dialog");
+    // Pas d'estimation de taille : les tailles du manifeste sont fausses pour
+    // une vingtaine de documents (un fichier de 0,8 Mo y est annoncé à 801 Mo).
+    // Le volume réel est affiché pendant et après le téléchargement.
+    const ok = await confirm(
+      `Télécharger les ${pending.length} documents affichés ?\n\n` +
+      `Le volume réel s'affiche au fur et à mesure. Tu peux interrompre à tout ` +
+      `moment : les fichiers déjà reçus sont conservés.`,
+      { title: "Télécharger la sélection", kind: "info" }
+    );
+    if (!ok) return;
+
+    setBatchResult(null);
+    setBatch({ done: 0, total: pending.length, failed: 0, bytes: 0, current: "" });
+    try {
+      const summary = await invoke<{ downloaded: number; failed: number; bytes: number; cancelled: boolean }>(
+        "download_batch",
+        {
+          kind: "docs",
+          collection: null,
+          items: pending.map((d) => ({ url: d.url, filename: docFileName(d) })),
+        }
+      );
+      setBatchResult(
+        `${summary.cancelled ? "Interrompu — " : ""}${summary.downloaded} document(s) téléchargé(s) · ` +
+        `${formatBytes(summary.bytes)}` +
+        (summary.failed > 0 ? ` · ${summary.failed} échec(s)` : "")
+      );
+    } catch (e) {
+      setBatchResult(`Échec du lot : ${e}`);
+    } finally {
+      setBatch(null);
+      await refresh();
+    }
+  };
 
   const addToAgenda = async (doc: DocItem) => {
     const filename = docFileName(doc);
@@ -105,6 +165,47 @@ export function DocsSection({ search, onAddToPlaylist }: {
           ))}
         </select>
       </div>
+
+      {batch === null && pending.length > 0 && (
+        <button
+          onClick={downloadAll}
+          className="flex items-center gap-2 rounded bg-[#5865f2] px-3 py-2 text-[11px] font-bold text-white transition hover:bg-[#4752c4]"
+        >
+          <DownloadCloud size={14} />
+          Tout télécharger ({pending.length})
+        </button>
+      )}
+
+      {batch && (
+        <div className="rounded-lg border border-[#5865f2]/30 bg-[#5865f2]/[0.07] p-3">
+          <div className="flex items-center gap-3">
+            <div className="min-w-0 flex-1">
+              <p className="text-[11px] font-bold text-gray-100">
+                Téléchargement {batch.done} / {batch.total}
+                <span className="ml-2 font-normal text-gray-400">{formatBytes(batch.bytes)}</span>
+                {batch.failed > 0 && <span className="ml-2 text-amber-400">{batch.failed} échec(s)</span>}
+              </p>
+              <p className="truncate text-[10px] text-gray-500">{batch.current}</p>
+            </div>
+            <button
+              onClick={() => invoke("cancel_batch_download").catch(() => null)}
+              className="flex shrink-0 items-center gap-1 rounded border border-white/15 px-2.5 py-1.5 text-[10px] font-bold text-gray-300 transition hover:border-red-500/50 hover:text-red-400"
+            >
+              <X size={11} /> Arrêter
+            </button>
+          </div>
+          <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+            <div className="h-full bg-[#5865f2] transition-[width] duration-200"
+                 style={{ width: `${batch.total ? (batch.done / batch.total) * 100 : 0}%` }} />
+          </div>
+        </div>
+      )}
+
+      {batchResult && (
+        <p className="rounded border border-emerald-500/25 bg-emerald-500/10 p-2.5 text-[11px] font-semibold text-emerald-400">
+          {batchResult}
+        </p>
+      )}
 
       {documents.length === 0 ? (
         <EmptyState>Aucun document ne correspond à cette recherche.</EmptyState>

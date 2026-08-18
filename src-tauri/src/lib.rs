@@ -1564,6 +1564,140 @@ fn clean_partial_downloads(app_handle: tauri::AppHandle) -> Result<u64, String> 
     Ok(freed)
 }
 
+// ---------------------------------------------------------------------------
+// Téléchargement groupé (recueils audio, catégories de documents)
+// ---------------------------------------------------------------------------
+// Un recueil compte jusqu'à 700 pistes, une catégorie de documents plusieurs
+// dizaines de PDF : les prendre un par un n'est pas tenable. On enchaîne donc
+// les téléchargements côté Rust, en séquence (pour ne pas se faire limiter par
+// les hébergeurs), en sautant ce qui est déjà là, et SANS s'arrêter à la
+// première erreur — un fichier manquant ne doit pas ruiner le lot entier.
+
+static BATCH_CANCEL: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+
+fn batch_cancel_flag() -> &'static std::sync::atomic::AtomicBool {
+    BATCH_CANCEL.get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+}
+
+#[derive(Deserialize)]
+struct BatchItem {
+    url: String,
+    filename: String,
+}
+
+#[derive(Clone, Serialize)]
+struct BatchProgress {
+    done: usize,
+    total: usize,
+    skipped: usize,
+    failed: usize,
+    bytes: u64,
+    current: String,
+}
+
+#[derive(Serialize)]
+struct BatchSummary {
+    downloaded: usize,
+    skipped: usize,
+    failed: usize,
+    bytes: u64,
+    cancelled: bool,
+}
+
+/// Interrompt le lot en cours. Le fichier en cours de transfert est terminé,
+/// puis la boucle s'arrête proprement.
+#[tauri::command]
+fn cancel_batch_download() -> Result<(), String> {
+    batch_cancel_flag().store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
+#[tauri::command]
+async fn download_batch(
+    app_handle: tauri::AppHandle,
+    kind: String,
+    collection: Option<String>,
+    items: Vec<BatchItem>,
+) -> Result<BatchSummary, String> {
+    use std::sync::atomic::Ordering;
+    use tauri::Emitter;
+
+    batch_cancel_flag().store(false, Ordering::Relaxed);
+
+    let dir = library_collection_dir(&app_handle, &kind, &collection)?;
+    let client = reqwest::Client::builder()
+        .user_agent("MyProjector/1.0")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let total = items.len();
+    let mut downloaded = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+    let mut bytes = 0u64;
+
+    for (index, item) in items.iter().enumerate() {
+        if batch_cancel_flag().load(Ordering::Relaxed) {
+            return Ok(BatchSummary { downloaded, skipped, failed, bytes, cancelled: true });
+        }
+
+        if safe_component(&item.filename).is_err() {
+            failed += 1;
+            continue;
+        }
+        let dest = dir.join(&item.filename);
+        if dest.exists() {
+            skipped += 1;
+        } else {
+            match fetch_to_file(&client, &kind, &item.url, &dir, &item.filename).await {
+                Ok(n) => { downloaded += 1; bytes += n; }
+                Err(e) => {
+                    failed += 1;
+                    eprintln!("Lot {}: {} a échoué: {}", kind, item.filename, e);
+                }
+            }
+        }
+
+        let _ = app_handle.emit("batch_download_progress", BatchProgress {
+            done: index + 1, total, skipped, failed, bytes,
+            current: item.filename.clone(),
+        });
+    }
+
+    Ok(BatchSummary { downloaded, skipped, failed, bytes, cancelled: false })
+}
+
+/// Télécharge une URL vers <dir>/<filename>, via un .part renommé à la fin.
+async fn fetch_to_file(
+    client: &reqwest::Client,
+    kind: &str,
+    url: &str,
+    dir: &Path,
+    filename: &str,
+) -> Result<u64, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("URL invalide: {}", e))?;
+    let host = parsed.host_str().unwrap_or("");
+    if !host_allowed(kind, host) {
+        return Err(format!("Hôte non autorisé: {}", host));
+    }
+
+    let mut response = client.get(url).send().await.map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+
+    let tmp = dir.join(format!("{}.part", filename));
+    let mut file = fs::File::create(&tmp).map_err(|e| e.to_string())?;
+    let mut written = 0u64;
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        file.write_all(&chunk).map_err(|e| e.to_string())?;
+        written += chunk.len() as u64;
+    }
+    drop(file);
+    fs::rename(&tmp, dir.join(filename)).map_err(|e| e.to_string())?;
+    Ok(written)
+}
+
 #[derive(Serialize)]
 struct LibraryFile {
     filename: String,
@@ -2064,6 +2198,8 @@ pub fn run() {
             save_playlist_file,
             read_playlist_file,
             download_library_file,
+            download_batch,
+            cancel_batch_download,
             list_library_files,
             delete_library_file,
             read_library_json,
