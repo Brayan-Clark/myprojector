@@ -137,6 +137,46 @@ clairement et ouvre la page de téléchargement.
 
 ---
 
+## Construire en local
+
+```bash
+npm run build:app
+npm run build:app -- --bundles deb      # un seul format
+```
+
+**⚠ Pas `npm run tauri build` directement.** `tauri.conf.json` contient la clé
+publique de mise à jour : tauri réclame alors la clé privée pour signer, et
+s'arrête sur *« A public key has been found, but no private key »*.
+`scripts/build.mjs` lit la clé dans `~/.myprojector-keys/` et la passe par
+l'environnement — elle n'est écrite nulle part.
+
+Clé ailleurs ? `TAURI_SIGNING_PRIVATE_KEY_PATH=/chemin/vers/la.key npm run build:app`
+
+---
+
+## Réutiliser un numéro de version
+
+Supprimer un tag sur GitHub ne le supprime pas en local. Le script distingue les
+deux cas :
+
+| Situation | Message |
+|---|---|
+| Tag présent sur GitHub | *déjà publié — choisis un numéro supérieur* |
+| Tag local seulement | donne la commande : `git tag -d v0.0.1` |
+
+Pour repartir proprement d'un numéro déjà essayé :
+
+```bash
+git tag -d v0.0.1                        # local
+git push origin :refs/tags/v0.0.1        # distant, si besoin
+npm run release 0.0.1
+```
+
+Supprime aussi la release correspondante sur GitHub, sinon le tag est recréé
+avec elle.
+
+---
+
 ## Si la construction échoue
 
 1. Ouvrir l'onglet **Actions** du dépôt, cliquer sur le job en rouge.

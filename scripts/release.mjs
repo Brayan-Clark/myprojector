@@ -43,8 +43,27 @@ if (run("git", ["status", "--porcelain"])) {
 }
 
 const tag = `v${version}`;
-const tags = run("git", ["tag", "--list", tag]);
-if (tags) fail(`Le tag ${tag} existe déjà. Choisis un numéro supérieur.`);
+
+// Un tag peut survivre en local après avoir été supprimé sur GitHub. Les deux
+// cas n'appellent pas la même réponse, on les distingue donc au lieu de
+// refuser sans explication.
+let onRemote = false;
+try {
+  onRemote = !!run("git", ["ls-remote", "--tags", "origin", `refs/tags/${tag}`]);
+} catch {
+  // Pas de réseau : on se contente de la vérification locale.
+}
+
+if (onRemote) {
+  fail(`Le tag ${tag} est déjà publié sur GitHub. Choisis un numéro supérieur.`);
+}
+if (run("git", ["tag", "--list", tag])) {
+  fail(
+    `Le tag ${tag} n'existe plus sur GitHub mais reste présent en local.\n` +
+    `  Supprime-le pour pouvoir réutiliser ce numéro :\n\n` +
+    `      git tag -d ${tag}`
+  );
+}
 
 const branch = run("git", ["rev-parse", "--abbrev-ref", "HEAD"]);
 

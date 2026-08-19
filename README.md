@@ -75,8 +75,12 @@ npm run tauri dev
 ### Construire localement
 
 ```bash
-npm run tauri build      # .deb, .rpm et AppImage dans src-tauri/target/release/bundle/
+npm run build:app        # .deb, .rpm et AppImage dans src-tauri/target/release/bundle/
 ```
+
+Pas `npm run tauri build` directement : depuis la mise en place des mises à
+jour, tauri exige la clé privée de signature. `build:app` la fournit
+automatiquement depuis `~/.myprojector-keys/`.
 
 ### Publier une version
 
