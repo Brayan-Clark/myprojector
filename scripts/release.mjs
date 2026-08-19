@@ -21,8 +21,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+// `stdio: "inherit"` renvoie null (la sortie est allée au terminal, pas dans une
+// variable) : sans le `?? ""`, le simple fait d'afficher la progression de git
+// faisait planter le script APRES un push pourtant réussi.
 const run = (cmd, args, opts = {}) =>
-  execFileSync(cmd, args, { cwd: root, encoding: "utf8", stdio: "pipe", ...opts }).trim();
+  (execFileSync(cmd, args, { cwd: root, encoding: "utf8", stdio: "pipe", ...opts }) ?? "").trim();
 
 const fail = (msg) => { console.error(`\n✗ ${msg}\n`); process.exit(1); };
 
