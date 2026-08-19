@@ -7,6 +7,7 @@ import { isTypingTarget } from './lib/keys';
 import { MiddleEditor } from './components/MiddleEditor';
 import { RightProjection } from './components/RightProjection';
 import { LiveView } from './components/LiveView';
+import { UpdateBanner } from './components/UpdateBanner';
 
 function App() {
   const [songs, setSongs] = useState<any[]>([]);
@@ -687,6 +688,9 @@ function App() {
 
   return (
     <div className="flex flex-col h-screen w-full bg-[#18191c] overflow-hidden font-sans text-gray-200">
+      {/* Uniquement dans la fenêtre de contrôle : `isLiveMode` a déjà renvoyé
+          la vue de projection plus haut, qui ne doit rien afficher de tel. */}
+      <UpdateBanner />
       <Toolbar
         setBgImage={handleUpdateBgImage}
         textSettings={tbTextSettings}

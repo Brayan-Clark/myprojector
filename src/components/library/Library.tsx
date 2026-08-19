@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { BookOpen, Check, FileText, HardDrive, Headphones, History, Music, Search, Smartphone, Stethoscope, Sunrise, Save, Keyboard, X } from "lucide-react";
+import { BookOpen, Check, FileText, HardDrive, Headphones, History, Music, Search, Smartphone, Stethoscope, Sunrise, Save, Keyboard, RefreshCw, X } from "lucide-react";
 import { DocsSection } from "./DocsSection";
 import { MofonainaSection } from "./MofonainaSection";
 import { AudioSection } from "./AudioSection";
@@ -10,8 +10,9 @@ import { HistorySection } from "./HistorySection";
 import { BackupSection } from "./BackupSection";
 import { RemoteSection } from "./RemoteSection";
 import { HelpSection } from "./HelpSection";
+import { UpdateSection } from "./UpdateSection";
 
-type SectionId = "hymnes" | "bible" | "docs" | "mofonaina" | "audio" | "storage" | "diagnostic" | "history" | "backup" | "remote" | "help";
+type SectionId = "hymnes" | "bible" | "docs" | "mofonaina" | "audio" | "storage" | "diagnostic" | "history" | "backup" | "remote" | "update" | "help";
 
 const SECTIONS: { id: SectionId; label: string; hint: string; icon: any }[] = [
   { id: "hymnes", label: "Recueils", hint: "Chants", icon: Music },
@@ -24,6 +25,7 @@ const SECTIONS: { id: SectionId; label: string; hint: string; icon: any }[] = [
   { id: "diagnostic", label: "Diagnostic", hint: "État machine", icon: Stethoscope },
   { id: "backup", label: "Sauvegarde", hint: "Profil", icon: Save },
   { id: "remote", label: "Télécommande", hint: "Depuis le mobile", icon: Smartphone },
+  { id: "update", label: "Mise à jour", hint: "Version", icon: RefreshCw },
   { id: "help", label: "Raccourcis", hint: "Aide", icon: Keyboard },
 ];
 
@@ -119,6 +121,7 @@ export function Library({ onClose, onLoadDb, onAddToPlaylist }: {
           {section === "diagnostic" && <DiagnosticSection />}
           {section === "backup" && <BackupSection />}
           {section === "remote" && <RemoteSection />}
+          {section === "update" && <UpdateSection />}
           {section === "help" && <HelpSection />}
           {(section === "hymnes" || section === "bible") && (
             <ModulesSection category={section} search={search} onLoadDb={onLoadDb} />

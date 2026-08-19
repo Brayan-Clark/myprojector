@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Clés de signature des mises à jour — ne JAMAIS committer
+*.key
+*.key.pub

@@ -59,6 +59,18 @@
           "gstreamer1-plugins-bad-free"
         ]
       }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Brayan-Clark/myprojector/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ1QjE4Qzg0NEVGMzUxNjQKUldSa1VmTk9oSXl4MVNNNkE2M1RNM0ZORTJsUlBmbmRkQTZLempyalVOZmFWU2ZuK296UzFETkUK",
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

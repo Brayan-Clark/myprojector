@@ -1,0 +1,104 @@
+name: Release
+
+# Une release se déclenche sur un TAG de version, pas sur chaque push :
+# publier une version à chaque commit rendrait le numéro de version
+# insignifiant et enverrait une notification de mise à jour à tout le monde
+# pour la moindre correction de virgule.
+#
+#   npm run release 0.2.0     -> met à jour les versions, commit, tag, pousse
+#
+# `workflow_dispatch` permet aussi de relancer une construction à la main.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      # On ne veut PAS qu'un échec sur macOS annule les binaires Windows et
+      # Linux déjà en cours : chaque plateforme vit sa vie.
+      fail-fast: false
+      matrix:
+        include:
+          # Universel Intel + Apple Silicon dans un seul bundle.
+          - platform: macos-latest
+            args: "--target universal-apple-darwin"
+            rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+          # Ubuntu 22.04 et pas la dernière : le binaire est lié à la glibc du
+          # système de compilation. Compiler sur 24.04 casserait Debian 12,
+          # LMDE et toutes les distributions un peu moins récentes.
+          - platform: ubuntu-22.04
+            args: ""
+            rust-targets: ""
+          - platform: windows-latest
+            args: ""
+            rust-targets: ""
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dépendances système (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev \
+            libssl-dev \
+            build-essential \
+            file \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-libav
+        # gstreamer est nécessaire à la compilation ET au bundle : l'AppImage
+        # embarque les codecs (`bundleMediaFramework`), sans quoi les vidéos ne
+        # se lisent pas sur une machine qui n'a pas installé gstreamer.
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signature des mises à jour. Sans la clé privée, les binaires se
+          # construisent mais aucun client existant n'acceptera la mise à jour.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # Notre clé n'a PAS de mot de passe. La variable doit malgré tout
+          # exister et valoir "" : si elle est absente, tauri bascule en saisie
+          # interactive et la construction échoue (« No such device »). Le
+          # secret peut donc rester non créé — l'expression donne alors "".
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "MyProjector ${{ github.ref_name }}"
+          releaseBody: "Voir les modifications ci-dessous. Téléchargez le fichier correspondant à votre système."
+          # Brouillon : les trois plateformes déposent leurs fichiers, puis
+          # c'est vous qui publiez. Tant que la release est en brouillon, aucun
+          # utilisateur ne reçoit la notification de mise à jour.
+          releaseDraft: true
+          prerelease: false
+          # Génère `latest.json`, le fichier que l'application interroge.
+          includeUpdaterJson: true
+          args: ${{ matrix.args }}

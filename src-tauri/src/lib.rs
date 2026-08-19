@@ -1776,6 +1776,35 @@ fn read_library_json(app_handle: tauri::AppHandle, kind: String, filename: Strin
     fs::read_to_string(&path).map_err(|e| format!("Lecture de {}: {}", filename, e))
 }
 
+/// Comment cette installation peut se mettre à jour.
+///
+/// `"auto"` : le binaire se remplace tout seul (AppImage, installeur Windows,
+/// bundle macOS) — le plugin de mise à jour sait faire.
+/// `"manual"` : l'application a été installée par le gestionnaire de paquets
+/// (.deb, .rpm). Tauri ne remplace PAS un paquet système : on prévient
+/// l'utilisateur et on l'envoie télécharger la nouvelle version lui-même.
+#[tauri::command]
+fn update_install_kind() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        // La variable APPIMAGE est posée par le runtime AppImage lui-même.
+        if std::env::var_os("APPIMAGE").is_some() {
+            return "auto".to_string();
+        }
+        return "manual".to_string();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        "auto".to_string()
+    }
+}
+
+/// Page des versions publiées, pour la mise à jour manuelle.
+#[tauri::command]
+fn releases_url() -> String {
+    "https://github.com/Brayan-Clark/myprojector/releases/latest".to_string()
+}
+
 /// Cache local des manifestes distants.
 ///
 /// La bibliothèque lit ses catalogues (documents, playbacks, trimestres) sur
@@ -2236,6 +2265,12 @@ pub fn run() {
             }
         })
         .plugin(tauri_plugin_fs::init())
+        // Mise à jour : le plugin ne fait que VERIFIER et télécharger sur
+        // demande explicite. Rien ne s'installe sans l'accord de l'utilisateur
+        // (voir `src/lib/updater.ts`) — on ne redémarre pas une machine en
+        // plein culte parce qu'une version est sortie.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
@@ -2323,7 +2358,9 @@ pub fn run() {
             clear_audio_cache,
             clean_partial_downloads,
             cache_manifest,
-            read_cached_manifest
+            read_cached_manifest,
+            update_install_kind,
+            releases_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

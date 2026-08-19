@@ -5,7 +5,7 @@
 // plutôt que d'imposer un convertisseur, on laisse la machine de l'utilisateur
 // choisir : LibreOffice, WPS, OnlyOffice, ou tout ce qui est installé.
 
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 
 /** Formats rendus directement dans la fenêtre de projection. */
 const PROJECTABLE = /\.(pdf|txt|md|markdown)$/i;
@@ -50,5 +50,21 @@ export async function revealInFolder(path: string): Promise<string | null> {
       console.error("revealInFolder", path, e, e2);
       return `Dossier introuvable : ${e2 instanceof Error ? e2.message : String(e2)}`;
     }
+  }
+}
+
+/**
+ * Ouvre une adresse web dans le NAVIGATEUR du système.
+ *
+ * Jamais dans une fenêtre de l'application : une page distante n'a rien à faire
+ * dans le même webview que la projection.
+ */
+export async function openExternalUrl(url: string): Promise<string | null> {
+  try {
+    await openUrl(url);
+    return null;
+  } catch (e) {
+    console.error("openExternalUrl", url, e);
+    return `Ouverture impossible : ${e instanceof Error ? e.message : String(e)}`;
   }
 }

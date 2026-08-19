@@ -1,51 +1,114 @@
-# MyProjector - Solution de Projection Professionnelle
+# MyProjector
 
-MyProjector est une application moderne développée avec **Tauri, React et TypeScript**, conçue spécialement pour la projection de paroles (chants, recueils) et de versets bibliques pendant les services et événements.
+Logiciel de projection pour les cultes : chants, versets bibliques, méditations,
+documents, vidéos et diapos Markdown, sur un second écran.
 
-## 🚀 Fonctionnalités Clés
+Construit avec **Tauri 2 + React 19 + TypeScript**. Cible principale : **Linux**
+(WebKitGTK) ; Windows et macOS sont construits par la CI.
 
-### 📖 Gestion de Contenu
-- **Bible Intégrée** : Recherche rapide par référence (ex: `Jean 3:16`) avec défilement automatique vers le verset sélectionné.
-- **Recueils de Chants** : Organisation par livres et recherche plein texte.
-- **Agenda / Playlist** : Préparez votre ordre de service à l'avance.
+---
 
-### 📽️ Projection & Live
-- **Double Écran** : Contrôle indépendant entre l'interface opérateur et l'écran de projection (mode Plein Écran automatique).
-- **Aperçu en Temps Réel** : Visualisez ce qui est projeté ou ce qui va l'être.
-- **Mode Caméra** : Intégration de flux caméra en arrière-plan (Incrustation).
-- **Cacher le Contenu** : Masquez/Affichez le texte instantanément (Fonction "Freeze").
+## Documentation
 
-### 🎨 Personnalisation visuelle
-- **Médiathèque Permanente** : Importez vos propres images et vidéos. L'application les copie dans un dossier interne pour garantir leur disponibilité.
-- **Styles Dynamiques** : Modifiez la police, la taille, l'alignement et l'interligne individuellement ou par catégorie.
-- **Fonds Vidéo** : Support des formats MP4, WebM, etc., avec lecture fluide en boucle.
+Quatre documents, à lire selon le besoin :
 
-### ➕ Fonctionnalités "Projection Plus"
-- **Horloge Personnalisable** : Affichage numérique ou analogique avec réglage de la taille, de la couleur et de la position.
-- **Message Défilant (Marquee)** : Bandes d'informations défilantes avec contrôle de la vitesse, de l'opacité du fond et de la police.
+| Document | Quand l'ouvrir |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Comprendre comment l'application est faite, où vivent les données, pourquoi certains choix bizarres sont volontaires |
+| [docs/RELEASE.md](docs/RELEASE.md) | Publier une nouvelle version, gérer les clés de signature et la mise à jour automatique |
+| [docs/BIBLIOTHEQUE.md](docs/BIBLIOTHEQUE.md) | Ajouter ou corriger des contenus téléchargeables (documents, audio, Mofon'aina) |
+| [docs/DEPANNAGE.md](docs/DEPANNAGE.md) | Quelque chose ne marche pas sur une machine d'utilisateur |
 
-## 🛠️ Installation & Développement
+---
+
+## Fonctionnalités
+
+**Contenus**
+- Bible avec recherche par référence (`Jean 3:16`, `1Jao.3.16`, `Gen 1`)
+- Recueils de chants, recherche plein texte et par numéro
+- Agenda (ordre du culte) : chants, versets, textes libres, Markdown, images,
+  vidéos, audio, PDF, YouTube, liens web
+- Bibliothèque téléchargeable : documents PDF, playbacks des cantiques,
+  méditations Mofon'aina — **tout est optionnel**, rien n'est imposé
+
+**Projection**
+- Fenêtre de projection indépendante, plein écran sur le second moniteur
+- Aperçu opérateur, horloge, bandeau défilant, écran noir / blanc, masquage
+- Fonds image ou vidéo (lecture automatique en boucle)
+- Caméra en arrière-plan
+- Audio associé : playback d'un cantique, chapitre de la Bible malgache
+
+**Autour**
+- Télécommande depuis un téléphone sur le même réseau Wi-Fi
+- Historique des chants projetés, sauvegarde du profil
+- Check système (codecs, écrans, serveur média, espace disque)
+- Mise à jour proposée automatiquement, jamais imposée
+
+Raccourcis clavier : dans l'application, **Bibliothèque → Raccourcis**.
+
+---
+
+## Démarrer
 
 ### Prérequis
-- [Node.js](https://nodejs.org/) (LTS)
-- [Rust](https://www.rust-lang.org/) (via rustup)
-- Dépendances Tauri (voir la [documentation officielle](https://tauri.app/v1/guides/getting-started/prerequisites))
 
-### Lancer en développement
+- [Node.js](https://nodejs.org/) LTS
+- [Rust](https://www.rust-lang.org/) via rustup
+- Sur Debian / Ubuntu / Linux Mint :
+
+```bash
+sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
+  libxdo-dev libssl-dev libappindicator3-dev librsvg2-dev patchelf \
+  gstreamer1.0-libav gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+```
+
+`gstreamer1.0-libav` n'est pas optionnel : sans lui, **aucune vidéo H.264 ne se
+lit**. Voir [docs/DEPANNAGE.md](docs/DEPANNAGE.md).
+
+### Développer
+
 ```bash
 npm install
 npm run tauri dev
 ```
 
-### Compiler l'application
+### Construire localement
+
 ```bash
-npm run tauri build
+npm run tauri build      # .deb, .rpm et AppImage dans src-tauri/target/release/bundle/
 ```
 
-## 📂 Architecture
-- `src/` : Frontend React + TailwindCSS.
-- `src-tauri/` : Backend Rust gérant le système de fichiers, la base de données SQLite et les fenêtres natives.
-- `data/` : Dossier contenant les bases de données (bible, hymnes) et les médias importés.
+### Publier une version
 
-## 📄 Licence
-Ce projet est destiné à un usage communautaire et ecclésial.
+```bash
+npm run release 0.2.0    # versionne, tag, pousse → la CI construit les 3 systèmes
+```
+
+Détails complets, y compris les clés de signature :
+[docs/RELEASE.md](docs/RELEASE.md).
+
+---
+
+## Organisation du dépôt
+
+```
+src/                    Interface React
+  components/           Composants d'écran
+    library/            Bibliothèque plein écran (une section par fichier)
+  lib/                  Logique pure et ponts vers Rust
+  data/                 Données embarquées (carte audio de la Bible)
+src-tauri/
+  src/lib.rs            Tout le backend Rust : commandes, serveur média, télécommande
+  data/                 Bibles et recueils livrés avec l'application
+  capabilities/         Permissions Tauri (à élargir avec parcimonie)
+  tauri.conf.json       Configuration, CSP, bundle, mise à jour
+scripts/release.mjs     Script de publication
+.github/workflows/      Construction multi-plateforme
+docs/                   Cette documentation
+```
+
+---
+
+## Licence
+
+Usage communautaire et ecclésial.
