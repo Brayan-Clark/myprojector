@@ -8,7 +8,7 @@ import {
 } from "../../lib/library";
 import { useLibraryDownloads } from "./useLibrary";
 import { fileExtension, isProjectableDocument, openWithSystem } from "../../lib/openExternal";
-import { Card, EmptyState, ErrorBox, InstallButton, Spinner } from "./ui";
+import { Card, EmptyState, ErrorBox, InstallButton, OfflineNotice, Spinner } from "./ui";
 
 /** Les 179 PDF du dépôt : téléchargement à la carte, puis projection. */
 export function DocsSection({ search, onAddToPlaylist }: {
@@ -34,9 +34,12 @@ export function DocsSection({ search, onAddToPlaylist }: {
     return () => { if (un) un(); };
   }, []);
 
+  const [stale, setStale] = useState(false);
   const load = () => {
     setError(null);
-    fetchDocsManifest().then(setManifest).catch((e) => setError(String(e.message || e)));
+    fetchDocsManifest()
+      .then(({ data, stale: fromCache }) => { setManifest(data); setStale(fromCache); })
+      .catch((e) => setError(String(e.message || e)));
   };
   useEffect(load, []);
 
@@ -145,6 +148,12 @@ export function DocsSection({ search, onAddToPlaylist }: {
 
   return (
     <div className="space-y-5">
+      {stale && (
+        <OfflineNotice
+          detail="Catalogue servi depuis le cache local : les documents déjà téléchargés restent ouvrables, les autres attendront la connexion."
+          onRetry={load}
+        />
+      )}
       <div className="flex flex-wrap items-center gap-2">
         <Chip active={category === "all"} onClick={() => setCategory("all")}>
           Toutes ({manifest.documents.length})

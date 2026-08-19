@@ -8,7 +8,7 @@ import {
 } from "../../lib/library";
 import { cleanUrl } from "../../lib/media";
 import { useLibraryDownloads } from "./useLibrary";
-import { Card, EmptyState, ErrorBox, InstallButton, Spinner } from "./ui";
+import { Card, EmptyState, ErrorBox, InstallButton, OfflineNotice, Spinner } from "./ui";
 
 /**
  * Playbacks des cantiques. Deux modes, au choix de l'utilisateur :
@@ -20,15 +20,20 @@ export function AudioSection({ search, onAddToPlaylist }: {
   onAddToPlaylist: (item: any) => void;
 }) {
   const [collections, setCollections] = useState<PlaybackCollection[] | null>(null);
+  const [stale, setStale] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [opened, setOpened] = useState<PlaybackCollection | null>(null);
 
   const load = () => {
     setError(null);
-    fetchPlaybackCollections().then(setCollections).catch((e) => setError(String(e.message || e)));
+    fetchPlaybackCollections()
+      .then(({ data, stale: fromCache }) => { setCollections(data); setStale(fromCache); })
+      .catch((e) => setError(String(e.message || e)));
   };
   useEffect(load, []);
 
+  // Hors ligne, `fetchPlaybackCollections` ressert la dernière liste connue :
+  // on n'échoue donc que si l'application n'a jamais vu le catalogue.
   if (error) return <ErrorBox message={error} onRetry={load} />;
   if (!collections) return <Spinner label="Chargement des playbacks" />;
 
@@ -39,28 +44,33 @@ export function AudioSection({ search, onAddToPlaylist }: {
   const q = search.trim().toLowerCase();
   const visible = q ? collections.filter((c) => c.title.toLowerCase().includes(q)) : collections;
 
-  return visible.length === 0 ? (
-    <EmptyState>Aucun recueil audio ne correspond.</EmptyState>
-  ) : (
-    <div className="grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-3">
-      {visible.map((c) => (
-        <Card
-          key={c.id}
-          accent={c.color || "#10b981"}
-          eyebrow={c.lang}
-          title={c.title}
-          meta={<span className="flex items-center gap-1.5"><Music size={11} /> {c.count ?? "?"} pistes</span>}
-          onOpen={() => setOpened(c)}
-          actions={
-            <button
-              onClick={() => setOpened(c)}
-              className="w-full rounded bg-[#5865f2] px-3 py-1.5 text-[11px] font-bold text-white transition hover:bg-[#4752c4]"
-            >
-              Ouvrir le recueil
-            </button>
-          }
-        />
-      ))}
+  return (
+    <div className="space-y-4">
+      {stale && <OfflineNotice detail="Recueils listés depuis le cache local : seules les pistes déjà téléchargées sont lisibles." onRetry={load} />}
+      {visible.length === 0 ? (
+        <EmptyState>Aucun recueil audio ne correspond.</EmptyState>
+      ) : (
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-3">
+          {visible.map((c) => (
+            <Card
+              key={c.id}
+              accent={c.color || "#10b981"}
+              eyebrow={c.lang}
+              title={c.title}
+              meta={<span className="flex items-center gap-1.5"><Music size={11} /> {c.count ?? "?"} pistes</span>}
+              onOpen={() => setOpened(c)}
+              actions={
+                <button
+                  onClick={() => setOpened(c)}
+                  className="w-full rounded bg-[#5865f2] px-3 py-1.5 text-[11px] font-bold text-white transition hover:bg-[#4752c4]"
+                >
+                  Ouvrir le recueil
+                </button>
+              }
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -84,9 +94,12 @@ function TrackList({ collection, search, onBack, onAddToPlaylist }: {
   } | null>(null);
   const [batchResult, setBatchResult] = useState<string | null>(null);
 
+  const [stale, setStale] = useState(false);
   const load = () => {
     setError(null);
-    fetchPlaybackTracks(collection.id).then(setTracks).catch((e) => setError(String(e.message || e)));
+    fetchPlaybackTracks(collection.id)
+      .then(({ data, stale: fromCache }) => { setTracks(data); setStale(fromCache); })
+      .catch((e) => setError(String(e.message || e)));
   };
   useEffect(load, [collection.id]);
 
@@ -247,6 +260,8 @@ function TrackList({ collection, search, onBack, onAddToPlaylist }: {
           </p>
         </div>
       </div>
+
+      {stale && <OfflineNotice detail="Liste servie depuis le cache local : seules les pistes marquées « Installé » sont lisibles." onRetry={load} />}
 
       <div className="flex flex-wrap items-center gap-2">
         <p className="flex flex-1 items-center gap-2 rounded border border-white/5 bg-[#1e1f22] px-3 py-2 text-[11px] text-gray-400">

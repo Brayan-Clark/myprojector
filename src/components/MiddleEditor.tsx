@@ -1,5 +1,6 @@
-import { useState, useEffect, useMemo } from 'react';
-import { FileText, Plus, Save, Edit3, Eye } from 'lucide-react';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { FileText, Plus, Save, Edit3, Eye, AlertCircle } from 'lucide-react';
+import { MarkdownToolbar, handleMarkdownShortcut } from './MarkdownToolbar';
 import { AudioPlayer } from './AudioPlayer';
 import { MarkdownView } from './MarkdownView';
 import { getSlides } from '../lib/slides';
@@ -24,9 +25,13 @@ export function MiddleEditor({
   const [textContent, setTextContent] = useState<string | null>(null);
   const [numPages, setNumPages] = useState(0);
   const [viewPage, setViewPage] = useState(1);
+  const mdRef = useRef<HTMLTextAreaElement>(null);
+  /** Id de l'élément dont le contenu local a été chargé (voir `isDirty`). */
+  const loadedId = useRef<any>(null);
 
   useEffect(() => {
     if (activeSong) {
+      loadedId.current = activeSong.id;
       setLocalTitle(activeSong.title || "");
       setLocalContent(activeSong.lyrics || "");
       setIsEditing(false);
@@ -69,14 +74,23 @@ export function MiddleEditor({
     if (!activeSong) return;
     setIsSaving(true);
     try {
-      // Assuming db_name mapped back to original db, or activeSong.book
-      // But book is pure book name for bible.
-      // Hymnes are from adventools_data... 
-      // For hymnes, activeSong.book contains the dbName without .db. So book + ".db".
-      if (!activeSong.type || !['custom', 'image', 'video', 'document'].includes(activeSong.type)) {
+      // Seuls les éléments VENANT d'une base (cantique ou verset) y sont
+      // réécrits. `book` porte le nom du fichier SQLite d'origine, et un
+      // élément d'agenda n'en a pas : c'est donc la provenance qu'on teste.
+      //
+      // Avant, on excluait une LISTE de types ('custom', 'image', 'video',
+      // 'document'). Chaque nouveau type d'agenda — markdown, texte du
+      // Mofon'aina, audio, YouTube, lien — passait au travers et tentait
+      // d'écrire dans "undefined.SQLite3".
+      const fromDatabase =
+        typeof activeSong.book === 'string' && activeSong.book.trim() !== '';
+
+      if (fromDatabase) {
+        // Un verset n'a pas de numéro exploitable ("Chap" ou une référence) ;
+        // un cantique, si. C'est ce qui distingue une bible d'un recueil.
         const isBible = activeSong.number === "Chap" || isNaN(Number(activeSong.number));
         const dbName = isBible ? `${activeSong.book}.SQLite3` : `${activeSong.book}.db`;
-        
+
         await invoke("update_song", {
           dbName,
           isBible,
@@ -94,6 +108,20 @@ export function MiddleEditor({
       setIsSaving(false);
     }
   };
+  /**
+   * Modifications non enregistrées.
+   *
+   * On compare au contenu d'origine plutôt que de lever un drapeau à la
+   * première frappe : revenir en arrière (ou annuler avec Ctrl+Z) éteint donc
+   * l'alerte, ce qui la rend fiable. Le test sur `loadedId` évite un faux
+   * positif pendant le rendu qui suit un changement de sélection, avant que
+   * l'effet de chargement n'ait remis les champs à jour.
+   */
+  const isDirty = useMemo(() => {
+    if (!activeSong || loadedId.current !== activeSong.id) return false;
+    return localTitle !== (activeSong.title || "") || localContent !== (activeSong.lyrics || "");
+  }, [activeSong, localTitle, localContent]);
+
   // Aperçu vivant : on découpe le texte EN COURS d'édition, pas celui enregistré.
   const slides = useMemo(
     () => (activeSong?.type === 'markdown' ? getSlides({ ...activeSong, lyrics: localContent }) : []),
@@ -127,8 +155,20 @@ export function MiddleEditor({
              onClick={() => setIsEditing(true)}
            >
               <Edit3 size={12} /> Éditer
+              {/* Point visible même en mode Vue : on peut basculer entre les deux
+                  modes sans sauvegarder, et l'oubli ne doit pas être silencieux. */}
+              {isDirty && <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />}
            </button>
         </div>
+
+        {isDirty && (
+           <span
+              className="flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold text-amber-400"
+              title="Tes modifications ne sont pas encore enregistrées."
+           >
+              <AlertCircle size={11} /> Non sauvegardé
+           </span>
+        )}
 
         {/* Audio associé : playback d'un cantique ou chapitre de la Bible
             malgache. N'apparaît que si l'élément en a un. */}
@@ -159,10 +199,12 @@ export function MiddleEditor({
               </div>
            )}
            <button className="text-gray-400 hover:text-white transition" title="Ajouter un chant"><Plus size={16} /></button>
-           {isEditing && (
+           {(isEditing || isDirty) && (
               <button 
-                 className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs font-bold text-white transition ${isSaving ? 'bg-gray-500' : 'bg-green-600 hover:bg-green-500'}`}
-                 title="Sauvegarder les modifications"
+                 className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs font-bold text-white transition ${
+                    isSaving ? 'bg-gray-500' : isDirty ? 'bg-green-600 hover:bg-green-500 ring-2 ring-amber-400/60' : 'bg-green-600 hover:bg-green-500'
+                 }`}
+                 title="Sauvegarder les modifications (Ctrl+S)"
                  onClick={handleSave}
                  disabled={isSaving}
               >
@@ -293,17 +335,30 @@ export function MiddleEditor({
             </span>
           </div>
 
-          <div className="flex-1 flex min-h-0">
-            {isEditing && (
+          {/* Un seul volet : on édite en mode Éditer, on relit en mode Vue.
+              L'aperçu côte à côte doublait un mode qui existe déjà en haut. */}
+          {isEditing ? (
+            <div className="flex-1 flex flex-col min-h-0">
+              <MarkdownToolbar textareaRef={mdRef} onChange={setLocalContent} />
               <textarea
-                className="w-1/2 h-full bg-[#18191c] p-3 text-gray-200 resize-none outline-none leading-relaxed text-sm font-mono border-r border-[#202225]"
+                ref={mdRef}
+                className="flex-1 w-full bg-[#18191c] p-4 text-gray-200 resize-none outline-none leading-relaxed text-sm font-mono"
                 value={localContent}
                 onChange={(e) => setLocalContent(e.target.value)}
+                onKeyDown={(e) => {
+                  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+                    e.preventDefault();
+                    handleSave();
+                    return;
+                  }
+                  handleMarkdownShortcut(e, setLocalContent);
+                }}
                 placeholder={"# Titre\n\nTexte en **gras**, liste :\n- point\n\n---\n\n## Diapo suivante"}
                 spellCheck={false}
               />
-            )}
-            <div className={`${isEditing ? 'w-1/2' : 'w-full'} h-full overflow-y-auto p-4 text-gray-200`}>
+            </div>
+          ) : (
+            <div className="flex-1 min-h-0 overflow-y-auto p-4 text-gray-200">
               {slides.map((slide: string, i: number) => (
                 <div key={i} className="mb-4 rounded border border-[#202225] bg-[#2b2d31] p-3">
                   <div className="mb-2 text-[9px] font-bold uppercase tracking-widest text-gray-500">
@@ -313,7 +368,7 @@ export function MiddleEditor({
                 </div>
               ))}
             </div>
-          </div>
+          )}
         </div>
       ) : (
         /* ====== MODE TEXTE / EDIT ====== */
@@ -323,6 +378,9 @@ export function MiddleEditor({
               className="w-full h-full bg-[#18191c] p-3 rounded text-gray-200 resize-none outline-none leading-relaxed text-sm font-medium ring-1 ring-[#5865f2]"
               value={localContent}
               onChange={(e) => setLocalContent(e.target.value)}
+              onKeyDown={(e) => {
+                if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); handleSave(); }
+              }}
             />
           ) : (
             <div className="w-full text-gray-200 whitespace-pre-line leading-relaxed text-sm font-medium">

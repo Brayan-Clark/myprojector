@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Star, AlertCircle, Presentation, MonitorOff, Headphones, Youtube, Globe, FileText, Camera, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Star, AlertCircle, Presentation, MonitorOff, Headphones, Youtube, Globe, FileText, Camera, ChevronLeft, ChevronRight, Film, Gauge } from 'lucide-react';
 import { cleanUrl } from '../lib/media';
 import { PdfViewer } from './PdfViewer';
 import { MarkdownView } from './MarkdownView';
@@ -95,6 +95,28 @@ export function RightProjection({
   }, [activeVerseIdx, verses, activeSong, projectedSong, isBaseScreenProjected]);
 
   const previewStreamRef = useRef<MediaStream | null>(null);
+
+  /**
+   * APERCU ALLEGE — pourquoi ce réglage existe.
+   *
+   * Le petit moniteur n'est pas une capture de la fenêtre de projection : il
+   * refait le même rendu de son côté. Pour du texte c'est gratuit, mais pour
+   * une vidéo cela veut dire DEUX décodages simultanés de la même vidéo, à
+   * pleine résolution (WebKit décode la source, pas la taille d'affichage).
+   * Rien dans Tauri/WebKitGTK ne permet de miroiter une fenêtre à moindre coût.
+   *
+   * On applique donc ici la règle déjà retenue pour la caméra : tant que le
+   * direct est ouvert, l'aperçu ne décode pas une seconde fois — l'opérateur
+   * voit l'image en grand sur l'écran de projection. Le bouton permet de
+   * revenir à l'aperçu complet si on préfère la fidélité au confort.
+   */
+  const [lightPreview, setLightPreview] = useState(
+    () => localStorage.getItem("previewLightMode") !== "0"
+  );
+  useEffect(() => {
+    localStorage.setItem("previewLightMode", lightPreview ? "1" : "0");
+  }, [lightPreview]);
+  const spareDecoder = isLiveActive && lightPreview;
 
   useEffect(() => {
     const startCam = async () => {
@@ -214,10 +236,35 @@ export function RightProjection({
          {/* Label */}
          <div className="absolute top-1 left-2 z-30 text-[8px] font-black text-white/40 tracking-widest uppercase pointer-events-none">Ecran de Presentation</div>
 
+         {/* Bascule aperçu allégé / fidèle — visible seulement pendant le direct,
+             puisque c'est le seul moment où le double décodage a lieu. */}
+         {isLiveActive && (
+            <button
+               onClick={() => setLightPreview((v: boolean) => !v)}
+               title={lightPreview
+                  ? "Aperçu allégé : les vidéos ne sont décodées que sur l'écran de projection. Cliquer pour un aperçu fidèle."
+                  : "Aperçu fidèle : les vidéos sont décodées deux fois. Cliquer pour alléger."}
+               className={`absolute top-1 right-1 z-30 flex items-center gap-1 rounded px-1.5 py-0.5 text-[7px] font-black uppercase tracking-widest transition ${
+                  lightPreview
+                     ? "bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25"
+                     : "bg-white/10 text-white/50 hover:bg-white/20"
+               }`}
+            >
+               <Gauge size={9} /> {lightPreview ? "Allégé" : "Fidèle"}
+            </button>
+         )}
+
          {/* Background — always visible (same as LiveView) */}
          <div className="absolute inset-0 z-0">
             {bgImage?.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i) ? (
-               <BackgroundVideo src={cleanUrl(bgImage)!} label="Fond aperçu" />
+               spareDecoder ? (
+                  <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-black">
+                     <Film size={16} className="text-[#5865f2]" />
+                     <span className="text-[6px] font-bold uppercase tracking-widest text-[#8891f2]">Fond vidéo en direct</span>
+                  </div>
+               ) : (
+                  <BackgroundVideo src={cleanUrl(bgImage)!} label="Fond aperçu" />
+               )
             ) : bgImage ? (
                <img src={cleanUrl(bgImage)} className="w-full h-full object-cover" alt="Background" />
             ) : (
@@ -243,16 +290,43 @@ export function RightProjection({
          {!isBaseScreenProjected && projectedSong && (
             <div className="absolute inset-0 flex items-center justify-center flex-col p-4 z-20">
                {projectedSong.type === 'markdown' ? (
-                  /* Aperçu fidèle : la diapo Markdown est rendue comme à l'écran. */
-                  <div className="absolute inset-0 z-20 overflow-hidden bg-black/40 p-3">
-                     <div className="h-full overflow-y-auto text-white">
-                        <MarkdownView content={getSlides(projectedSong)[projectedVerseIdx] || ''} variant="preview" />
+                  /* Aperçu fidèle : même voile et mêmes réglages de texte que
+                     la fenêtre de projection, pour que le fond reste visible. */
+                  <div className="absolute inset-0 z-20 overflow-hidden bg-black/35 p-3">
+                     <div
+                        className="flex h-full flex-col overflow-y-auto"
+                        style={{
+                           justifyContent: textSettings?.valign === 'middle' ? 'center'
+                              : textSettings?.valign === 'bottom' ? 'flex-end' : 'flex-start',
+                           alignItems: textSettings?.align === 'center' ? 'center'
+                              : textSettings?.align === 'right' ? 'flex-end' : 'flex-start',
+                        }}
+                     >
+                        <MarkdownView
+                           content={getSlides(projectedSong)[projectedVerseIdx] || ''}
+                           variant="preview"
+                           style={{
+                              fontFamily: textSettings?.fontFamily,
+                              color: textSettings?.color || '#ffffff',
+                              textAlign: textSettings?.align || 'left',
+                              width: `${textSettings?.contentWidth || 100}%`,
+                           }}
+                        />
                      </div>
                   </div>
                ) : ['image', 'video', 'document', 'audio', 'youtube', 'link'].includes(projectedSong.type) ? (
                   <div className="w-full h-full flex items-center justify-center z-20 absolute inset-0 bg-black">
                      {projectedSong.type === 'image' && <img src={cleanUrl(projectedSong.lyrics)} className="w-full h-full object-contain" alt="Media" />}
-                     {projectedSong.type === 'video' && <ProjectedVideo src={cleanUrl(projectedSong.lyrics)!} controls={false} muted label="Aperçu vidéo" />}
+                     {projectedSong.type === 'video' && (
+                        spareDecoder ? (
+                           <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-black">
+                              <Film size={16} className="text-[#5865f2] animate-pulse" />
+                              <span className="text-[6px] font-bold uppercase tracking-widest text-[#8891f2]">Vidéo lue en direct</span>
+                           </div>
+                        ) : (
+                           <ProjectedVideo src={cleanUrl(projectedSong.lyrics)!} controls={false} muted label="Aperçu vidéo" />
+                        )
+                     )}
                      {projectedSong.type === 'audio' && (
                        <div className="flex flex-col items-center gap-1">
                           <Headphones size={16} className="text-green-400 animate-pulse" />

@@ -1436,11 +1436,32 @@ fn check_gstreamer() -> Check {
     check("codecs", "Décodeurs vidéo", "ok", "Fournis par le système.".into(), None)
 }
 
+/// Lecture automatique des fonds vidéo : on remonte ce que WebKit a REELLEMENT
+/// retenu, pas ce qu'on lui a demandé.
+#[cfg(target_os = "linux")]
+fn check_autoplay() -> Check {
+    match AUTOPLAY_ALLOWED.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => check("autoplay", "Lecture automatique des fonds", "ok",
+            "WebKit accepte de démarrer les vidéos sans clic.".into(), None),
+        0 => check("autoplay", "Lecture automatique des fonds", "error",
+            "WebKit continue d'exiger un clic : la vidéo de fond ne démarrera qu'après une interaction dans la fenêtre de projection.".into(),
+            Some("Signale-le : c'est un réglage refusé par cette version de WebKitGTK.".into())),
+        _ => check("autoplay", "Lecture automatique des fonds", "warn",
+            "Réglage non encore appliqué (aucune page chargée ?).".into(), None),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn check_autoplay() -> Check {
+    check("autoplay", "Lecture automatique des fonds", "ok", "Géré par le système.".into(), None)
+}
+
 #[tauri::command]
 fn run_diagnostics(app_handle: tauri::AppHandle) -> Result<Vec<Check>, String> {
     let mut checks = Vec::new();
 
     checks.push(check_gstreamer());
+    checks.push(check_autoplay());
 
     // Serveur média local : on tente une vraie connexion TCP.
     let server = std::net::TcpStream::connect_timeout(
@@ -1755,6 +1776,53 @@ fn read_library_json(app_handle: tauri::AppHandle, kind: String, filename: Strin
     fs::read_to_string(&path).map_err(|e| format!("Lecture de {}: {}", filename, e))
 }
 
+/// Cache local des manifestes distants.
+///
+/// La bibliothèque lit ses catalogues (documents, playbacks, trimestres) sur
+/// GitHub. Sans connexion, ces requêtes échouent et l'utilisateur perdait
+/// l'accès à TOUT, y compris à ce qu'il avait déjà téléchargé. On garde donc
+/// une copie du dernier catalogue reçu : hors ligne, l'application repart de
+/// cette copie au lieu d'afficher une erreur.
+fn manifest_cache_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let mut dir = get_data_root(app_handle)?;
+    dir.push("data");
+    dir.push("_manifests");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// Une clé de cache devient un nom de fichier : on n'accepte donc aucun
+/// séparateur de chemin, seulement des caractères de slug.
+fn safe_cache_key(key: &str) -> Result<String, String> {
+    if key.is_empty()
+        || key.len() > 120
+        || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        || key.contains("..")
+    {
+        return Err(format!("Clé de cache invalide: {}", key));
+    }
+    Ok(format!("{}.json", key))
+}
+
+#[tauri::command]
+fn cache_manifest(app_handle: tauri::AppHandle, key: String, contents: String) -> Result<(), String> {
+    let name = safe_cache_key(&key)?;
+    let path = manifest_cache_dir(&app_handle)?.join(name);
+    fs::write(&path, contents).map_err(|e| e.to_string())
+}
+
+/// Renvoie `None` (et non une erreur) quand rien n'a encore été mis en cache :
+/// l'absence de cache est un état normal, pas un incident.
+#[tauri::command]
+fn read_cached_manifest(app_handle: tauri::AppHandle, key: String) -> Result<Option<String>, String> {
+    let name = safe_cache_key(&key)?;
+    let path = manifest_cache_dir(&app_handle)?.join(name);
+    if !path.exists() {
+        return Ok(None);
+    }
+    fs::read_to_string(&path).map(Some).map_err(|e| e.to_string())
+}
+
 /// Liste les trimestres Mofon'aina disponibles sur GitHub.
 /// Appelé depuis Rust car l'API GitHub n'est pas autorisée par la CSP du webview.
 #[tauri::command]
@@ -1767,7 +1835,17 @@ async fn list_remote_mofonaina() -> Result<Vec<String>, String> {
         .get("https://api.github.com/repos/Brayan-Clark/adventools/contents/mofonaina?ref=data")
         .send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
-        return Err(format!("GitHub a répondu {}", resp.status()));
+        let status = resp.status();
+        // L'API GitHub est limitée à 60 appels par heure et par adresse IP quand
+        // on n'est pas authentifié : passé ce seuil elle répond 403 alors que la
+        // connexion fonctionne parfaitement. Le message doit le dire, sinon on
+        // conclut à tort qu'on est hors ligne.
+        let hint = if status.as_u16() == 403 || status.as_u16() == 429 {
+            " (quota de l'API GitHub atteint : réessaie dans une heure — les trimestres déjà téléchargés restent accessibles)"
+        } else {
+            ""
+        };
+        return Err(format!("GitHub a répondu {}{}", status, hint));
     }
     let items: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     let mut names = Vec::new();
@@ -1973,8 +2051,17 @@ fn get_app_data_path(app_handle: tauri::AppHandle) -> Result<String, String> {
 // `media-playback-requires-user-gesture` peut être à TRUE : la vidéo de fond
 // n'est alors jamais lancée et WebKit affiche un gros bouton "play" au milieu.
 // On force donc explicitement les réglages média à chaque webview créé.
+///
+/// La politique est RELUE après écriture : sur certaines distributions le
+/// réglage n'est pas pris en compte, et sans cette relecture on n'a aucun moyen
+/// de distinguer "WebKit refuse" d'un problème de codec. La valeur observée est
+/// remontée dans le Check système (voir `check_autoplay`).
+#[cfg(target_os = "linux")]
+static AUTOPLAY_ALLOWED: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
+
 #[cfg(target_os = "linux")]
 fn apply_media_settings(webkit_webview: &webkit2gtk::WebView) {
+    use std::sync::atomic::Ordering;
     use webkit2gtk::{SettingsExt, WebViewExt};
     if let Some(settings) = WebViewExt::settings(webkit_webview) {
         // Autoplay : aucune interaction requise (c'est un fond, il doit tourner seul)
@@ -1983,6 +2070,11 @@ fn apply_media_settings(webkit_webview: &webkit2gtk::WebView) {
         settings.set_enable_media_stream(true);
         settings.set_enable_webaudio(true);
         settings.set_enable_webgl(true);
+
+        let allowed = !settings.is_media_playback_requires_user_gesture();
+        AUTOPLAY_ALLOWED.store(if allowed { 1 } else { 0 }, Ordering::Relaxed);
+    } else {
+        AUTOPLAY_ALLOWED.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -2129,6 +2221,20 @@ pub fn run() {
             
             Ok(())
         })
+        .on_page_load(|_webview, _payload| {
+            // La fenêtre de projection est créée APRÈS le setup, et
+            // `on_window_event` ne se déclenche que sur un évènement (focus,
+            // déplacement...) qui peut arriver trop tard. Ce hook-ci passe pour
+            // CHAQUE webview au moment où son document se charge : c'est le seul
+            // endroit qui garantit que la politique d'autoplay est posée avant
+            // que la vidéo de fond ne tente de démarrer.
+            #[cfg(target_os = "linux")]
+            {
+                let _ = _webview.with_webview(|platform_webview: tauri::webview::PlatformWebview| {
+                    apply_media_settings(&platform_webview.inner());
+                });
+            }
+        })
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
@@ -2215,7 +2321,9 @@ pub fn run() {
             set_remote_enabled,
             set_remote_state,
             clear_audio_cache,
-            clean_partial_downloads
+            clean_partial_downloads,
+            cache_manifest,
+            read_cached_manifest
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

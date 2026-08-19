@@ -275,7 +275,27 @@ Texte en **gras**, en *italique*, et une liste :
   const addHymnAudio = async (e: any, item: any) => {
     e.stopPropagation();
     try {
-      const { resolveHymnAudio, hymnAudioSource } = await import('../lib/library');
+      const { resolveHymnAudio, hymnAudioSource, localHymnAudio } = await import('../lib/library');
+
+      // Fichier déjà téléchargé : on le sert sans jamais interroger le réseau.
+      // Sinon une coupure de connexion rendait inutilisable un playback pourtant
+      // présent sur le disque.
+      const local = await localHymnAudio(item.playback, item.number);
+      if (local) {
+        const { cleanUrl } = await import('../lib/media');
+        const url = cleanUrl(local.path);
+        if (url) {
+          setPlaylist([...playlist, {
+            id: Date.now().toString(),
+            title: `♪ ${item.title}`,
+            number: '🎵',
+            lyrics: url,
+            type: 'audio',
+          }]);
+          return;
+        }
+      }
+
       const track = await resolveHymnAudio(item.playback, item.number);
       if (!track) {
         alert(`Aucun playback trouvé pour le cantique ${item.number}.`);

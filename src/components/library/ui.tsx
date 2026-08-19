@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Check, Download, Loader2, Trash2 } from "lucide-react";
+import { Check, Download, Loader2, Trash2, WifiOff } from "lucide-react";
 import type { Progress } from "./useLibrary";
 
 /** Barre de progression d'un téléchargement en cours. */
@@ -120,6 +120,34 @@ export function Card({
         {meta && <div className="text-[11px] text-gray-500">{meta}</div>}
         <div className="mt-auto pt-3">{actions}</div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Bandeau "mode hors ligne".
+ *
+ * Affiché quand le catalogue distant est injoignable et qu'on travaille sur la
+ * dernière copie connue. Volontairement discret et non bloquant : tout ce qui
+ * est déjà sur le disque reste utilisable, seuls les nouveaux téléchargements
+ * sont impossibles.
+ */
+export function OfflineNotice({ detail, onRetry }: { detail?: string; onRetry?: () => void }) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded border border-amber-500/25 bg-amber-500/[0.07] px-3 py-2 text-[11px] text-amber-300">
+      <WifiOff size={13} className="shrink-0" />
+      <span className="font-semibold">Mode hors ligne</span>
+      <span className="text-amber-300/70">
+        {detail || "Catalogue injoignable — affichage de la dernière liste connue. Les contenus déjà téléchargés restent utilisables."}
+      </span>
+      {onRetry && (
+        <button
+          onClick={onRetry}
+          className="ml-auto rounded border border-amber-500/40 px-2 py-1 font-bold transition hover:bg-amber-500/15"
+        >
+          Réessayer
+        </button>
+      )}
     </div>
   );
 }

@@ -593,12 +593,42 @@ export function LiveView() {
 
       <div className={`absolute inset-0 w-full h-full transition-opacity duration-300 z-20 ${isContentHidden ? 'opacity-0' : 'opacity-100'}`}>
         {mediaOverlay && mediaOverlay.url && (
-          <div className="absolute inset-0 z-40 bg-black flex items-center justify-center">
+          /* Le fond noir opaque convient à une image, une vidéo ou un PDF, qui
+             occupent tout l'écran. Une diapo Markdown, elle, est du CONTENU :
+             elle doit se poser sur le fond d'écran de la présentation comme
+             n'importe quelle autre diapo. On ne garde qu'un voile pour la
+             lisibilité au-dessus d'un fond clair ou chargé. */
+          <div className={`absolute inset-0 z-40 flex items-center justify-center ${
+            mediaOverlay.type === 'markdown' ? 'bg-black/35' : 'bg-black'
+          }`}>
             {mediaOverlay.type === 'markdown' && (
-              /* Diapo Markdown : rendu complet (titres, tableaux, maths, médias).
-                 Le fond noir de l'overlay est conservé pour rester lisible. */
-              <div className="h-full w-full overflow-y-auto px-[6vw] py-[4vh] text-white">
-                <MarkdownView content={mediaOverlay.url} variant="projection" />
+              /* Diapo Markdown : rendu complet (titres, tableaux, maths, médias),
+                 avec la police, la couleur, l'alignement et la taille choisis
+                 dans la barre d'outils — les mêmes réglages que le texte. */
+              <div
+                className="flex h-full w-full flex-col overflow-y-auto px-[6vw] py-[4vh]"
+                style={{
+                  justifyContent: textSettings?.valign === 'middle' ? 'center'
+                    : textSettings?.valign === 'bottom' ? 'flex-end' : 'flex-start',
+                  alignItems: textSettings?.align === 'center' ? 'center'
+                    : textSettings?.align === 'right' ? 'flex-end' : 'flex-start',
+                }}
+              >
+                <MarkdownView
+                  content={mediaOverlay.url}
+                  variant="projection"
+                  className="drop-shadow-[0_4px_6px_rgba(0,0,0,0.9)]"
+                  style={{
+                    fontFamily: textSettings?.fontFamily,
+                    color: textSettings?.color || '#ffffff',
+                    textAlign: textSettings?.align || 'left',
+                    width: `${textSettings?.contentWidth || 100}%`,
+                    // Le texte simple projette à 7vh ; ici c'est la taille de
+                    // BASE, que les titres multiplient (h1 = 1.9em ≈ 6.6vh).
+                    fontSize: `${(textSettings?.fontSize || 100) / 100 * 3.5}vh`,
+                    lineHeight: textSettings?.lineHeight || 1.4,
+                  }}
+                />
               </div>
             )}
             {mediaOverlay.type === 'image' && <img src={cleanUrl(mediaOverlay.url)} className="w-full h-full object-contain" alt="Media" />}

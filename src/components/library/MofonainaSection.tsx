@@ -5,7 +5,7 @@ import {
   type MofonainaFile,
 } from "../../lib/library";
 import { useLibraryDownloads } from "./useLibrary";
-import { Card, EmptyState, ErrorBox, InstallButton, Spinner } from "./ui";
+import { Card, EmptyState, ErrorBox, InstallButton, OfflineNotice, Spinner } from "./ui";
 
 /** Mofon'aina : méditations quotidiennes, projetables comme un texte. */
 export function MofonainaSection({ search, onAddToPlaylist }: {
@@ -13,6 +13,7 @@ export function MofonainaSection({ search, onAddToPlaylist }: {
   onAddToPlaylist: (item: any) => void;
 }) {
   const [files, setFiles] = useState<string[] | null>(null);
+  const [stale, setStale] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [opened, setOpened] = useState<{ filename: string; data: MofonainaFile } | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
@@ -20,9 +21,21 @@ export function MofonainaSection({ search, onAddToPlaylist }: {
 
   const load = () => {
     setError(null);
-    fetchMofonainaFiles().then(setFiles).catch((e) => setError(String(e)));
+    fetchMofonainaFiles()
+      .then(({ data, stale: fromCache }) => {
+        setFiles(data);
+        setStale(fromCache ? "Liste servie depuis le cache local." : null);
+      })
+      .catch((e) => { setFiles([]); setError(String(e)); });
   };
   useEffect(load, []);
+
+  // Un trimestre téléchargé doit rester ouvrable même si le catalogue distant
+  // est injoignable : on affiche donc l'union du catalogue et du disque.
+  const trimestres = useMemo(() => {
+    const all = new Set<string>([...(files || []), ...installed]);
+    return [...all].sort().reverse();
+  }, [files, installed]);
 
   const open = async (filename: string) => {
     setOpenError(null);
@@ -92,8 +105,10 @@ export function MofonainaSection({ search, onAddToPlaylist }: {
       weekday: "long", day: "numeric", month: "long",
     });
 
-  if (error) return <ErrorBox message={error} onRetry={load} />;
   if (!files) return <Spinner label="Recherche des trimestres" />;
+  // On ne bloque sur l'erreur que s'il n'y a VRAIMENT rien à montrer.
+  if (error && trimestres.length === 0) return <ErrorBox message={error} onRetry={load} />;
+  const offline = error || stale;
 
   // --- Lecture d'un trimestre installé -------------------------------------
   if (opened) {
@@ -210,11 +225,17 @@ export function MofonainaSection({ search, onAddToPlaylist }: {
   return (
     <div className="space-y-4">
       {openError && <p className="rounded border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-400">{openError}</p>}
-      {files.length === 0 ? (
+      {offline && (
+        <OfflineNotice
+          detail={error ? `Catalogue injoignable (${error}) — seuls les trimestres déjà téléchargés sont listés.` : undefined}
+          onRetry={load}
+        />
+      )}
+      {trimestres.length === 0 ? (
         <EmptyState>Aucun trimestre publié pour le moment.</EmptyState>
       ) : (
         <div className="grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-3">
-          {files.map((filename) => {
+          {trimestres.map((filename) => {
             const isInstalled = installed.has(filename);
             const label = filename.replace(/\.json$/i, "").replace("-", " · trimestre ");
             return (

@@ -55,20 +55,67 @@ export interface MofonainaFile {
 
 export interface LibraryFile { filename: string; path: string; size: number }
 
-async function getJson<T>(path: string): Promise<T> {
-  // Cache-buster : GitHub sert les manifestes via un CDN qui garde longtemps
-  // les anciennes versions.
-  const res = await fetch(`${DATA_BASE}/${path}?c=${Date.now()}`);
-  if (!res.ok) throw new Error(`${path} : HTTP ${res.status}`);
-  return res.json();
+/**
+ * Catalogue distant, avec repli hors ligne.
+ *
+ * `stale: true` signifie que la connexion a échoué et qu'on ressert la dernière
+ * copie reçue. Sans ce repli, une coupure réseau masquait aussi les contenus
+ * déjà téléchargés : la bibliothèque devenait entièrement inutilisable hors
+ * ligne, alors que les fichiers étaient bien sur le disque.
+ */
+export interface Cached<T> { data: T; stale: boolean }
+
+/** Une clé de cache sert de nom de fichier côté Rust : slug uniquement. */
+const cacheKey = (s: string) => s.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/\.+/g, ".");
+
+async function getJson<T>(path: string, key: string): Promise<Cached<T>> {
+  try {
+    // Cache-buster : GitHub sert les manifestes via un CDN qui garde longtemps
+    // les anciennes versions.
+    const res = await fetch(`${DATA_BASE}/${path}?c=${Date.now()}`);
+    if (!res.ok) throw new Error(`${path} : HTTP ${res.status}`);
+    const text = await res.text();
+    const data = JSON.parse(text) as T;
+    // Mise en cache au fil de l'eau : le prochain démarrage hors ligne s'en sert.
+    invoke("cache_manifest", { key, contents: text }).catch((e) =>
+      console.warn("Mise en cache du catalogue impossible", key, e)
+    );
+    return { data, stale: false };
+  } catch (e) {
+    const cached = await readCache(key);
+    if (cached !== null) return { data: JSON.parse(cached) as T, stale: true };
+    throw e;
+  }
 }
 
-export const fetchDocsManifest = () => getJson<DocsManifest>("docs/manifest.json");
-export const fetchPlaybackCollections = () => getJson<PlaybackCollection[]>("audio/playbacks/manifest.json");
-export const fetchPlaybackTracks = (id: string) => getJson<PlaybackTrack[]>(`audio/playbacks/${id}.json`);
+const readCache = (key: string) =>
+  invoke<string | null>("read_cached_manifest", { key }).catch(() => null);
 
-/** Trimestres Mofon'aina disponibles (listés côté Rust : l'API GitHub n'est pas autorisée par la CSP). */
-export const fetchMofonainaFiles = () => invoke<string[]>("list_remote_mofonaina");
+export const fetchDocsManifest = () =>
+  getJson<DocsManifest>("docs/manifest.json", "docs-manifest");
+
+export const fetchPlaybackCollections = () =>
+  getJson<PlaybackCollection[]>("audio/playbacks/manifest.json", "audio-collections");
+
+export const fetchPlaybackTracks = (id: string) =>
+  getJson<PlaybackTrack[]>(`audio/playbacks/${id}.json`, cacheKey(`audio-tracks-${id}`));
+
+/**
+ * Trimestres Mofon'aina disponibles (listés côté Rust : l'API GitHub n'est pas
+ * autorisée par la CSP). Même repli hors ligne que les autres catalogues.
+ */
+export async function fetchMofonainaFiles(): Promise<Cached<string[]>> {
+  const key = "mofonaina-index";
+  try {
+    const data = await invoke<string[]>("list_remote_mofonaina");
+    invoke("cache_manifest", { key, contents: JSON.stringify(data) }).catch(() => {});
+    return { data, stale: false };
+  } catch (e) {
+    const cached = await readCache(key);
+    if (cached !== null) return { data: JSON.parse(cached) as string[], stale: true };
+    throw e;
+  }
+}
 
 export const listInstalled = (kind: LibraryKind, collection?: string) =>
   invoke<LibraryFile[]>("list_library_files", { kind, collection: collection ?? null });
@@ -121,9 +168,27 @@ export async function resolveHymnAudio(
   collection: string,
   number: string
 ): Promise<PlaybackTrack | null> {
-  const tracks = await fetchPlaybackTracks(collection);
+  const { data: tracks } = await fetchPlaybackTracks(collection);
   const n = String(number).trim();
   return tracks.find((t) => String(t.c_num ?? t.id).trim() === n) || null;
+}
+
+/**
+ * Piste déjà téléchargée pour un cantique, SANS toucher au réseau.
+ *
+ * Le nom de fichier local est `<numéro>.mp3` : on retrouve donc l'audio d'un
+ * chant sans le catalogue distant. C'est ce qui permet d'ajouter un playback à
+ * l'agenda hors ligne, alors qu'avant l'échec du manifeste faisait croire que
+ * le fichier n'existait pas.
+ */
+export async function localHymnAudio(
+  collection: string,
+  number: string
+): Promise<{ path: string; filename: string } | null> {
+  const filename = `${String(number).trim()}.mp3`;
+  const files = await listInstalled("audio", collection).catch(() => [] as LibraryFile[]);
+  const found = files.find((f) => f.filename === filename);
+  return found ? { path: found.path, filename } : null;
 }
 
 /** Source lisible d'une piste : le fichier local s'il existe, sinon le flux en ligne. */

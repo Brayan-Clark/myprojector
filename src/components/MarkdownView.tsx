@@ -23,17 +23,27 @@ type Variant = "projection" | "preview" | "editor";
  * Toutes les sources locales passent par cleanUrl() : elles sont donc servies
  * par le serveur local, comme le reste des médias de l'application.
  */
-export const MarkdownView = memo(({ content, variant = "preview" }: {
+export const MarkdownView = memo(({ content, variant = "preview", style, className = "" }: {
   content: string;
   variant?: Variant;
+  /**
+   * Mise en forme héritée de la présentation (police, couleur, alignement,
+   * taille). À la projection, une diapo Markdown doit suivre les mêmes réglages
+   * que les autres : elle n'est pas un îlot avec sa propre typographie.
+   */
+  style?: React.CSSProperties;
+  className?: string;
 }) => {
-  const scale =
-    variant === "projection" ? "text-[2.2vw] leading-relaxed"
+  // Une taille imposée par l'appelant remplace l'échelle par défaut ; les
+  // titres et listes restent en `em`, donc tout suit proportionnellement.
+  const scale = style?.fontSize
+    ? "leading-relaxed"
+    : variant === "projection" ? "text-[2.2vw] leading-relaxed"
     : variant === "editor" ? "text-sm"
     : "text-xs";
 
   return (
-    <div className={`markdown-body ${scale} w-full`}>
+    <div className={`markdown-body ${scale} ${className} w-full`} style={style}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}
