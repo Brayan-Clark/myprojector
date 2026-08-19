@@ -1,6 +1,6 @@
 [package]
 name = "myprojector"
-version = "0.1.0"
+version = "0.0.1"
 description = "MyProjector c'est un logiciel pour projeter des chants et des textes sur un écran"
 authors = ["Bryan Clark"]
 edition = "2021"
