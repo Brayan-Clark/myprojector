@@ -55,14 +55,19 @@ jobs:
             libssl-dev \
             build-essential \
             file \
-            libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-base \
             gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-bad \
-            gstreamer1.0-libav
-        # gstreamer est nécessaire à la compilation ET au bundle : l'AppImage
-        # embarque les codecs (`bundleMediaFramework`), sans quoi les vidéos ne
-        # se lisent pas sur une machine qui n'a pas installé gstreamer.
+            gstreamer1.0-libav \
+            gstreamer1.0-gl
+        # Paquets gstreamer d'EXECUTION uniquement, pas les `-dev`.
+        # 1. La compilation n'en a pas besoin : rien ici ne se lie à gstreamer,
+        #    c'est WebKitGTK qui l'appelle au moment de lire une vidéo.
+        # 2. L'AppImage embarque ces codecs (`bundleMediaFramework`) en copiant
+        #    les bibliothèques et greffons installés — donc les paquets runtime.
+        # 3. `libgstreamer1.0-dev` casse l'image ubuntu-22.04 de GitHub : il
+        #    dépend de `libunwind-dev`, incompatible avec le `libunwind-14-dev`
+        #    de LLVM déjà présent, d'où « held broken packages ».
 
       - uses: dtolnay/rust-toolchain@stable
         with:
