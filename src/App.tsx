@@ -2,12 +2,21 @@ import { useState, useEffect, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Toolbar } from './components/Toolbar';
 import { LeftSidebar } from './components/LeftSidebar';
-import { getSlides } from './lib/slides';
-import { isTypingTarget } from './lib/keys';
+import { getSlides, DEFAULT_SPLIT, withSplitDefaults } from './lib/slides';
+import { isTypingTarget, focusSlideList } from './lib/keys';
 import { MiddleEditor } from './components/MiddleEditor';
 import { RightProjection } from './components/RightProjection';
 import { LiveView } from './components/LiveView';
+import { StageView } from './components/StageView';
 import { UpdateBanner } from './components/UpdateBanner';
+import { ResizeHandle } from './components/ResizeHandle';
+import { PANES, usePaneSize } from './lib/panes';
+import { DEFAULT_BG_FILTERS } from './lib/bgStyle';
+import { DEFAULT_TRANSITION } from './lib/transitions';
+import { DEFAULT_PARALLEL, withParallelDefaults } from './lib/parallel';
+import { DEFAULT_HEADER, buildHeaderText } from './lib/header';
+import { DEFAULT_ANNOUNCEMENTS, announcementSlides, withAnnouncementDefaults } from './lib/announcements';
+import { DEFAULT_STAGE, withStageDefaults } from './lib/stage';
 
 function App() {
   const [songs, setSongs] = useState<any[]>([]);
@@ -134,9 +143,13 @@ function App() {
   }, [playlist]);
 
   const isLiveMode = useMemo(() => new URLSearchParams(window.location.search).get('live') === 'true', []);
+  const isStageMode = useMemo(() => new URLSearchParams(window.location.search).get('stage') === 'true', []);
 
   if (isLiveMode) {
     return <LiveView />;
+  }
+  if (isStageMode) {
+    return <StageView />;
   }
 
   // Global Shortcuts
@@ -153,6 +166,9 @@ function App() {
           setActiveVerseIdx(0);
           setIsBaseScreenProjected(false);
           setLiveCategory(playlist[0].type === 'bible' ? 'bible' : 'hymnes');
+          // La présentation démarre : les flèches doivent répondre tout de
+          // suite, même si on venait juste de taper dans la recherche.
+          focusSlideList();
         }
       }
       if (e.altKey && e.key.toLowerCase() === 's') {
@@ -288,14 +304,31 @@ function App() {
     valign: 'middle',
     color: '#ffffff',
     lineHeight: 1.4,
-    contentWidth: 100
+    contentWidth: 100,
+    // Lisibilité du texte sur le fond — voir src/lib/bgStyle.ts.
+    textShadow: 'soft',
   };
 
+  // L'entête était un réglage GLOBAL. C'était une incohérence : tout le reste
+  // de l'apparence se règle par portée, et on ne veut justement pas la même
+  // référence pour un cantique (« 123 — Titre », discrète) et pour un texte
+  // biblique (« Jaona 3:16 », bien visible). Elle rejoint donc la cascade.
+  //
+  // `legacyHeader` reprend une fois pour toutes l'ancien réglage global, pour
+  // ne pas effacer ce qui avait déjà été configuré.
+  const legacyHeader = useMemo(() => {
+    try { return JSON.parse(localStorage.getItem('headerSettings') || 'null') || {}; }
+    catch { return {}; }
+  }, []);
+  const baseHeader = { ...DEFAULT_HEADER, ...legacyHeader };
+
   const defaultStyles: any = {
-    chant: { textSettings: { ...defaultTextSettings }, bgImage: "/backgrounds/sunset.jpg" },
-    hymnes: { textSettings: { ...defaultTextSettings }, bgImage: "/backgrounds/sunset.jpg" },
-    bible: { textSettings: { ...defaultTextSettings, align: 'left' }, bgImage: "/backgrounds/tree.png" },
-    agenda: { textSettings: { ...defaultTextSettings }, bgImage: "/backgrounds/sunset.jpg" },
+    chant: { textSettings: { ...defaultTextSettings }, bgImage: "/backgrounds/sunset.jpg", bgFilters: { ...DEFAULT_BG_FILTERS }, header: { ...baseHeader }, transition: { ...DEFAULT_TRANSITION }, parallel: { ...DEFAULT_PARALLEL } },
+    hymnes: { textSettings: { ...defaultTextSettings }, bgImage: "/backgrounds/sunset.jpg", bgFilters: { ...DEFAULT_BG_FILTERS }, header: { ...baseHeader }, transition: { ...DEFAULT_TRANSITION }, parallel: { ...DEFAULT_PARALLEL } },
+    // Un verset projeté a besoin de sa référence : c'est elle qui permet à
+    // l'assemblée de suivre dans sa propre bible.
+    bible: { textSettings: { ...defaultTextSettings, align: 'left' }, bgImage: "/backgrounds/tree.png", bgFilters: { ...DEFAULT_BG_FILTERS }, header: { ...baseHeader, content: 'ref' }, transition: { ...DEFAULT_TRANSITION }, parallel: { ...DEFAULT_PARALLEL } },
+    agenda: { textSettings: { ...defaultTextSettings }, bgImage: "/backgrounds/sunset.jpg", bgFilters: { ...DEFAULT_BG_FILTERS }, header: { ...baseHeader }, transition: { ...DEFAULT_TRANSITION }, parallel: { ...DEFAULT_PARALLEL } },
   };
 
   const [settingsByCategory, setSettingsByCategory] = useState(() => {
@@ -320,27 +353,40 @@ function App() {
     if (!song || forceBase) {
       return {
         textSettings: { ...defaultStyles.chant?.textSettings, ...(specificSettings.base?.textSettings || {}) },
-        bgImage: specificSettings.base?.bgImage || defaultStyles.chant?.bgImage
+        bgImage: specificSettings.base?.bgImage || defaultStyles.chant?.bgImage,
+        bgFilters: { ...DEFAULT_BG_FILTERS, ...(specificSettings.base?.bgFilters || {}) },
+        header: { ...baseHeader, ...(specificSettings.base?.header || {}) },
+        transition: { ...DEFAULT_TRANSITION, ...(specificSettings.base?.transition || {}) },
+        parallel: { ...DEFAULT_PARALLEL }
       };
     }
     const category = categoryOverride || (song?.type === 'bible' ? 'bible' : 'hymnes');
     const baseCategoryStyle = defaultStyles[category] || defaultStyles.chant;
     let txt = { ...baseCategoryStyle.textSettings, ...(settingsByCategory[category]?.textSettings || {}) };
     let bg = settingsByCategory[category]?.bgImage || baseCategoryStyle.bgImage;
+    // Les traitements du fond se cumulent comme le style de texte : la portée
+    // la plus précise (un verset) complète celle du dessus (le livre, la
+    // catégorie) au lieu de la remplacer en bloc.
+    let flt = { ...DEFAULT_BG_FILTERS, ...(settingsByCategory[category]?.bgFilters || {}) };
+    let hdr = { ...baseCategoryStyle.header, ...(settingsByCategory[category]?.header || {}) };
+    let trs = { ...DEFAULT_TRANSITION, ...(settingsByCategory[category]?.transition || {}) };
+    let par = { ...DEFAULT_PARALLEL, ...(settingsByCategory[category]?.parallel || {}) };
 
-    if (song?.book && specificSettings.books[song.book]) {
-      txt = { ...txt, ...specificSettings.books[song.book].textSettings };
-      if (specificSettings.books[song.book].bgImage) bg = specificSettings.books[song.book].bgImage;
-    }
-    if (song?.id && specificSettings.songs[song.id]) {
-      txt = { ...txt, ...specificSettings.songs[song.id].textSettings };
-      if (specificSettings.songs[song.id].bgImage) bg = specificSettings.songs[song.id].bgImage;
-    }
-    if (song?.id && verseIdx !== -1 && specificSettings.verses[`${song.id}_${verseIdx}`]) {
-      txt = { ...txt, ...specificSettings.verses[`${song.id}_${verseIdx}`].textSettings };
-      if (specificSettings.verses[`${song.id}_${verseIdx}`].bgImage) bg = specificSettings.verses[`${song.id}_${verseIdx}`].bgImage;
-    }
-    return { textSettings: txt, bgImage: bg };
+    const layer = (scope: any) => {
+      if (!scope) return;
+      txt = { ...txt, ...scope.textSettings };
+      if (scope.bgImage) bg = scope.bgImage;
+      flt = { ...flt, ...(scope.bgFilters || {}) };
+      hdr = { ...hdr, ...(scope.header || {}) };
+      trs = { ...trs, ...(scope.transition || {}) };
+      par = { ...par, ...(scope.parallel || {}) };
+    };
+
+    if (song?.book) layer(specificSettings.books[song.book]);
+    if (song?.id) layer(specificSettings.songs[song.id]);
+    if (song?.id && verseIdx !== -1) layer(specificSettings.verses[`${song.id}_${verseIdx}`]);
+
+    return { textSettings: txt, bgImage: bg, bgFilters: flt, header: hdr, transition: trs, parallel: par };
   };
 
   // LIVE FEATURES: Clock and Ticker
@@ -356,6 +402,7 @@ function App() {
     };
   });
 
+  // Entête de projection (la référence par-dessus la diapo). Voir lib/header.ts.
   const [tickerSettings, setTickerSettings] = useState<any>(() => {
     const saved = localStorage.getItem('tickerSettings');
     const defaultTicker = {
@@ -391,22 +438,155 @@ function App() {
     [activeSong, activeVerseIdx, activeCategory, settingsByCategory, specificSettings]
   );
 
+  // --- Versions bibliques supplémentaires ---------------------------------
+  //
+  // Lues à part, et non dans `sync()` : sync est rejoué à chaque battement
+  // d'horloge ou changement de bandeau. Interroger la base à chacun de ces
+  // passages serait du gaspillage, alors que le verset, lui, n'a pas changé.
+  const [parallelVerses, setParallelVerses] = useState<any[]>([]);
+  const liveParallel = withParallelDefaults(computedLiveSettings.parallel);
+  const projectedIsBible = liveCategory === 'bible' || projectedSong?.type === 'bible';
+
+  useEffect(() => {
+    if (!projectedIsBible || isBaseScreenProjected || liveParallel.versions.length === 0
+        || !projectedSong?.book_no) {
+      setParallelVerses([]);
+      return;
+    }
+    const slides = getSlides(projectedSong, slideSplit);
+    const idx = Math.max(0, Math.min(projectedVerseIdx, slides.length - 1));
+    const verseNo = parseInt(slides[idx]?.match(/^\s*(\d+)/)?.[1] || '', 10);
+    if (!Number.isFinite(verseNo)) { setParallelVerses([]); return; }
+
+    let cancelled = false;
+    invoke<any[]>('fetch_parallel_verse', {
+      dbNames: liveParallel.versions,
+      bookNo: projectedSong.book_no,
+      chapter: parseInt(projectedSong.number, 10),
+      verse: verseNo,
+    })
+      .then((rows) => { if (!cancelled) setParallelVerses(rows); })
+      .catch((e) => { console.warn('fetch_parallel_verse', e); if (!cancelled) setParallelVerses([]); });
+    return () => { cancelled = true; };
+  }, [
+    projectedIsBible, isBaseScreenProjected, projectedSong?.id, projectedSong?.book_no,
+    projectedSong?.number, projectedVerseIdx, liveParallel.versions.join('|'),
+  ]);
+
+  // Découpage automatique des diapos trop longues. GLOBAL et désactivé par
+  // défaut : il change la numérotation des diapos, ce qui ne doit jamais
+  // arriver sans qu'on l'ait demandé.
+  const [slideSplit, setSlideSplit] = useState(() => {
+    try { return withSplitDefaults(JSON.parse(localStorage.getItem('slideSplit') || 'null')); }
+    catch { return { ...DEFAULT_SPLIT }; }
+  });
+  useEffect(() => {
+    localStorage.setItem('slideSplit', JSON.stringify(slideSplit));
+  }, [slideSplit]);
+
+  // Écran retour (estrade). Fermé par défaut : la troisième fenêtre n'existe
+  // que si on la demande.
+  const [stage, setStage] = useState(() => {
+    try { return withStageDefaults(JSON.parse(localStorage.getItem('stageSettings') || 'null')); }
+    catch { return { ...DEFAULT_STAGE }; }
+  });
+  useEffect(() => {
+    localStorage.setItem('stageSettings', JSON.stringify(stage));
+  }, [stage]);
+  const [isStageActive, setIsStageActive] = useState(false);
+  const [timerStart, setTimerStart] = useState<number | null>(null);
+
+  const handleStageToggle = async () => {
+    const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+    const existing = await WebviewWindow.getByLabel('stage');
+    if (existing) {
+      try { await existing.close(); } catch { setIsStageActive(false); }
+      return;
+    }
+    try {
+      // Fenêtre NORMALE, ni plein écran ni sans décorations : on ne sait pas
+      // sur quel moniteur l'écran de retour est branché, et deviner mal
+      // reviendrait à voler l'écran de projection. L'opérateur la place une
+      // fois, le système retient ensuite.
+      const w = new WebviewWindow('stage', {
+        url: '/?stage=true',
+        title: 'Écran retour — estrade',
+        width: 960,
+        height: 540,
+        focus: false,
+      });
+      setIsStageActive(true);
+      w.once('tauri://destroyed', () => setIsStageActive(false));
+      w.once('tauri://error', () => setIsStageActive(false));
+    } catch (e) {
+      console.error('Stage window failed', e);
+      setIsStageActive(false);
+    }
+  };
+
+  // Annonces de l'écran d'accueil. Globales et désactivées par défaut.
+  const [announcements, setAnnouncements] = useState(() => {
+    try { return withAnnouncementDefaults(JSON.parse(localStorage.getItem('announcements') || 'null')); }
+    catch { return { ...DEFAULT_ANNOUNCEMENTS }; }
+  });
+  useEffect(() => {
+    localStorage.setItem('announcements', JSON.stringify(announcements));
+  }, [announcements]);
+
+  const [annIndex, setAnnIndex] = useState(0);
+  const annSlides = useMemo(() => announcementSlides(announcements), [announcements]);
+  // Le défilement ne tourne QUE sur l'écran d'accueil : une annonce ne doit
+  // jamais remplacer un verset ou une strophe en cours de projection.
+  const annActive = announcements.enabled && isBaseScreenProjected && annSlides.length > 0;
+
+  useEffect(() => {
+    if (!annActive) { setAnnIndex(0); return; }
+    // Une seule annonce : rien à faire tourner, et un minuteur inutile
+    // relancerait une transition toutes les N secondes pour le même texte.
+    if (annSlides.length < 2) return;
+    const timer = setInterval(
+      () => setAnnIndex((i) => (i + 1) % annSlides.length),
+      announcements.interval * 1000
+    );
+    return () => clearInterval(timer);
+  }, [annActive, annSlides.length, announcements.interval]);
+
   // ROBUST SYNC: Ensures LiveView always matches the Controller
   const sync = async () => {
     localStorage.setItem('live_style', JSON.stringify(computedLiveSettings.textSettings));
     localStorage.setItem('live_bg', computedLiveSettings.bgImage);
+    // Écrit AVANT le test `isLiveActive`, comme le style : la fenêtre de
+    // projection lit ces clés à son ouverture, avant de recevoir le premier
+    // évènement. Sans ça le fond s'affichait une fraction de seconde sans son
+    // traitement, puis sautait.
+    localStorage.setItem('live_bg_filters', JSON.stringify(computedLiveSettings.bgFilters));
+    localStorage.setItem('live_header', JSON.stringify(computedLiveSettings.header));
+    localStorage.setItem('live_transition', JSON.stringify(computedLiveSettings.transition));
 
-    if (!isLiveActive) return;
+    // On ne sort plus tôt quand la projection est fermée : l'écran retour peut
+    // servir seul, en répétition, sans rien projeter à l'assemblée.
+    if (!isLiveActive && !isStageActive) return;
 
     const { emit } = await import('@tauri-apps/api/event');
 
     // 1. Send Style & Background
     emit('update_live_style', computedLiveSettings.textSettings).catch(() => null);
     emit('update_live_bg', computedLiveSettings.bgImage).catch(() => null);
+    emit('update_live_bg_filters', computedLiveSettings.bgFilters).catch(() => null);
 
     // 2. Compute Content
     let lyricsObj: any = { lines: [], reference: "", isBible: false };
     let mediaObj: any = null;
+
+    // Écran d'accueil + annonces activées : on projette l'annonce courante,
+    // avec le style et la transition de l'écran d'accueil.
+    if (annActive) {
+      lyricsObj = {
+        lines: (annSlides[annIndex % annSlides.length] || "").split("\n"),
+        reference: "",
+        isBible: false,
+      };
+    }
 
     if (!isBaseScreenProjected && projectedSong) {
       if (['image', 'video', 'document', 'audio', 'youtube', 'link'].includes(projectedSong.type)) {
@@ -414,32 +594,77 @@ function App() {
       } else if (projectedSong.type === 'markdown') {
         // Le Markdown garde sa structure : on transmet la diapo courante telle
         // quelle, la fenêtre de projection s'occupe du rendu.
-        const slides = getSlides(projectedSong);
+        const slides = getSlides(projectedSong, slideSplit);
         const safeIdx = Math.max(0, Math.min(projectedVerseIdx, slides.length - 1));
         mediaObj = { type: 'markdown', url: slides[safeIdx] || '' };
       } else {
-        const verses = projectedSong.lyrics.split(/\n\s*\n/);
+        // Même découpage que partout ailleurs. Cette ligne redécoupait le
+        // texte à la main : l'aperçu et la projection pouvaient diverger dès
+        // que la règle de découpage changeait.
+        const verses = getSlides(projectedSong, slideSplit);
         const safeIdx = Math.max(0, Math.min(projectedVerseIdx, verses.length - 1));
         const currentVerse = verses[safeIdx] || "";
         const lines = currentVerse.split('\n');
         const isBible = (liveCategory === 'bible' || projectedSong.type === 'bible');
 
+        // Le numéro du verset est la première ligne de la diapo biblique :
+        // c'est lui qui complète la référence (« Jean 3 » → « Jean 3:16 »).
         const refMatch = lines.length > 0 ? lines[0].match(/^(\d+)/) : null;
-        let reference = "";
-        if (isBible && refMatch) {
-          reference = `${projectedSong.title}:${refMatch[1]}`;
-        } else if (!isBible && projectedSong?.title) {
-          reference = `(${projectedSong.title})`;
-        }
-        lyricsObj = { lines, reference, isBible };
+        // L'entête appliquée est celle de la portée du contenu projeté : un
+        // cantique et un verset peuvent avoir chacun la leur.
+        const liveHeader = computedLiveSettings.header;
+        const reference = liveHeader.enabled
+          ? buildHeaderText(liveHeader, projectedSong, isBible, refMatch?.[1])
+          : "";
+        // Les versions supplémentaires voyagent avec la diapo : la fenêtre de
+        // projection n'a pas accès aux bases, elle ne fait que mettre en page.
+        lyricsObj = {
+          lines,
+          reference,
+          isBible,
+          parallels: isBible ? parallelVerses : [],
+          parallelStyle: {
+            sizeFactor: liveParallel.sizeFactor,
+            showBookName: liveParallel.showBookName,
+          },
+        };
       }
     }
 
     // 3. Emit atomic updates
-    emit('update_live_content', { lyrics: lyricsObj, media: mediaObj }).catch(() => null);
+    // La transition voyage AVEC le contenu, et non dans un évènement à part :
+    // c'est la diapo qui arrive qui décide de la façon dont elle arrive. Un
+    // évènement séparé pourrait être traité un cycle trop tard, et la diapo
+    // s'afficherait avec la transition de la précédente.
+    emit('update_live_content', {
+      lyrics: lyricsObj,
+      media: mediaObj,
+      transition: computedLiveSettings.transition,
+    }).catch(() => null);
     emit('update_live_hide_content', isContentHidden).catch(() => null);
     emit('update_live_clock', clockSettings).catch(() => null);
     emit('update_live_ticker', tickerSettings).catch(() => null);
+    emit('update_live_header', computedLiveSettings.header).catch(() => null);
+
+    // Écran retour : on lui envoie le texte DÉJÀ mis en forme, plus celui qui
+    // suit. Il n'a ainsi aucune base à lire ni média à décoder — une fenêtre
+    // de retour ne doit jamais ralentir la projection.
+    if (isStageActive) {
+      const stageSlides = projectedSong ? getSlides(projectedSong, slideSplit) : [];
+      const stagePayload = {
+        title: isBaseScreenProjected ? "Écran d'accueil" : (projectedSong?.title || ''),
+        current: lyricsObj.lines || [],
+        next: (!isBaseScreenProjected && projectedVerseIdx < stageSlides.length - 1)
+          ? stageSlides[projectedVerseIdx + 1] : '',
+        slide: Math.max(0, projectedVerseIdx),
+        slides: isBaseScreenProjected ? 0 : stageSlides.length,
+        settings: stage,
+        fontFamily: computedLiveSettings.textSettings?.fontFamily,
+        timerStart,
+      };
+      emit('update_stage', stagePayload).catch(() => null);
+      localStorage.setItem('stage_payload', JSON.stringify(stagePayload));
+    }
     emit('toggle_live_camera', isCameraActive).catch(() => null);
     emit('set_camera_id', selectedCamera).catch(() => null);
     emit('update_pdf_size', { width: pdfWidth, height: pdfHeight }).catch(() => null);
@@ -456,7 +681,7 @@ function App() {
       sync();
     }, 50);
     return () => clearTimeout(timer);
-  }, [isLiveActive, computedLiveSettings, projectedSong, projectedVerseIdx, isBaseScreenProjected, isContentHidden, liveCategory, clockSettings, tickerSettings, isCameraActive, selectedCamera, pdfWidth, pdfHeight]);
+  }, [isLiveActive, computedLiveSettings, projectedSong, projectedVerseIdx, isBaseScreenProjected, isContentHidden, liveCategory, clockSettings, tickerSettings, parallelVerses, annActive, annIndex, annSlides, isStageActive, stage, timerStart, slideSplit, isCameraActive, selectedCamera, pdfWidth, pdfHeight]);
 
   // Télécommande : on rejoue les raccourcis clavier existants plutôt que de
   // dupliquer la navigation. Toute la logique (fin de chant → écran de base,
@@ -494,7 +719,7 @@ function App() {
   // État publié pour la télécommande : l'opérateur voit sur son téléphone ce
   // qui est réellement projeté, plutôt que de cliquer à l'aveugle.
   useEffect(() => {
-    const slides = projectedSong ? getSlides(projectedSong).length : 0;
+    const slides = projectedSong ? getSlides(projectedSong, slideSplit).length : 0;
     invoke('set_remote_state', {
       state: JSON.stringify({
         live: isLiveActive,
@@ -537,6 +762,14 @@ function App() {
   useEffect(() => {
     let unlisten: any;
     import('@tauri-apps/api/event').then(({ listen }) => {
+      listen('stage_ready', () => sync()).then(u => unlisten = u);
+    });
+    return () => { if (unlisten) unlisten(); };
+  }, [projectedSong, projectedVerseIdx, isBaseScreenProjected, isStageActive, stage, timerStart]);
+
+  useEffect(() => {
+    let unlisten: any;
+    import('@tauri-apps/api/event').then(({ listen }) => {
       listen<number>('live_pdf_page_changed', (e) => setProjectedPdfPage(e.payload)).then(u => unlisten = u);
     });
     return () => { if (unlisten) unlisten(); };
@@ -573,75 +806,107 @@ function App() {
 
     let txt = { ...baseStyle.textSettings };
     let bg = baseStyle.bgImage;
+    let flt = { ...DEFAULT_BG_FILTERS, ...(baseStyle.bgFilters || {}) };
+    let hdr = { ...baseHeader, ...(baseStyle.header || {}) };
+    let trs = { ...DEFAULT_TRANSITION, ...(baseStyle.transition || {}) };
+    let par = { ...DEFAULT_PARALLEL, ...(baseStyle.parallel || {}) };
 
     const target = getEditingSettings();
     txt = { ...txt, ...target.textSettings };
     if (target.bgImage) bg = target.bgImage;
+    flt = { ...flt, ...(target.bgFilters || {}) };
+    hdr = { ...hdr, ...(target.header || {}) };
+    trs = { ...trs, ...(target.transition || {}) };
+    par = { ...par, ...(target.parallel || {}) };
 
-    return { textSettings: txt, bgImage: bg };
+    return { textSettings: txt, bgImage: bg, bgFilters: flt, header: hdr, transition: trs, parallel: par };
   };
 
   const tbContext = getEditingContext();
   const tbTextSettings = tbContext.textSettings;
   const tbBgImage = tbContext.bgImage;
+  const tbBgFilters = tbContext.bgFilters;
+  const tbHeader = tbContext.header;
+  const tbTransition = tbContext.transition;
+  const tbParallel = tbContext.parallel;
 
-  const handleUpdateTextSettings = (newText: any) => {
-    const nextStyle = typeof newText === 'function' ? newText(tbTextSettings) : newText;
-
+  /**
+   * Écrit UN champ de style dans la portée en cours d'édition.
+   *
+   * Les trois réglages (texte, image de fond, traitement du fond) suivent
+   * exactement la même cascade de portées. Elle était recopiée pour chacun :
+   * ajouter le traitement du fond aurait imposé une troisième copie, et une
+   * correction sur l'une des trois ne se propageait pas aux autres.
+   *
+   * Au passage, le compartiment visé est RECOPIÉ avant écriture. L'ancienne
+   * version écrivait dans `updated.verses[key]` d'un objet seulement copié en
+   * surface : elle modifiait donc l'état précédent au passage.
+   */
+  const updateScopeField = (field: 'textSettings' | 'bgImage' | 'bgFilters' | 'header' | 'transition' | 'parallel', value: any) => {
     if (editingScope === 'category') {
       setSettingsByCategory((prev: any) => {
         const updated = {
           ...prev,
-          [activeCategory]: { ...(prev[activeCategory] || defaultStyles.chant), textSettings: nextStyle }
+          [activeCategory]: { ...(prev[activeCategory] || defaultStyles.chant), [field]: value }
         };
         localStorage.setItem('appSettings', JSON.stringify(updated));
         return updated;
       });
-    } else {
-      setSpecificSettings((prev: any) => {
-        let updated = { ...prev };
-        if (editingScope === 'base') {
-          updated.base = { ...(updated.base || {}), textSettings: nextStyle };
-        } else if (editingScope === 'verse' && activeSong && activeVerseIdx !== -1) {
-          const key = `${activeSong.id}_${activeVerseIdx}`;
-          updated.verses[key] = { ...(updated.verses[key] || {}), textSettings: nextStyle };
-        } else if (editingScope === 'song' && activeSong) {
-          updated.songs[activeSong.id] = { ...(updated.songs[activeSong.id] || {}), textSettings: nextStyle };
-        } else if (editingScope === 'book' && activeSong?.book) {
-          updated.books[activeSong.book] = { ...(updated.books[activeSong.book] || {}), textSettings: nextStyle };
-        }
-        return updated;
-      });
+      return;
     }
+    setSpecificSettings((prev: any) => {
+      const updated = { ...prev };
+      const put = (bucket: 'books' | 'songs' | 'verses', key: string) => {
+        updated[bucket] = {
+          ...(updated[bucket] || {}),
+          [key]: { ...(updated[bucket]?.[key] || {}), [field]: value },
+        };
+      };
+      if (editingScope === 'base') {
+        updated.base = { ...(updated.base || {}), [field]: value };
+      } else if (editingScope === 'verse' && activeSong && activeVerseIdx !== -1) {
+        put('verses', `${activeSong.id}_${activeVerseIdx}`);
+      } else if (editingScope === 'song' && activeSong) {
+        put('songs', String(activeSong.id));
+      } else if (editingScope === 'book' && activeSong?.book) {
+        put('books', activeSong.book);
+      }
+      return updated;
+    });
   };
 
-  const handleUpdateBgImage = (newBg: any) => {
-    const nextBg = typeof newBg === 'function' ? newBg(tbBgImage) : newBg;
-    if (editingScope === 'category') {
-      setSettingsByCategory((prev: any) => {
-        const updated = {
-          ...prev,
-          [activeCategory]: { ...(prev[activeCategory] || defaultStyles.chant), bgImage: nextBg }
-        };
-        localStorage.setItem('appSettings', JSON.stringify(updated));
-        return updated;
-      });
-    } else {
-      setSpecificSettings((prev: any) => {
-        let updated = { ...prev };
-        if (editingScope === 'base') {
-          updated.base = { ...(updated.base || {}), bgImage: nextBg };
-        } else if (editingScope === 'verse' && activeSong && activeVerseIdx !== -1) {
-          const key = `${activeSong.id}_${activeVerseIdx}`;
-          updated.verses[key] = { ...(updated.verses[key] || {}), bgImage: nextBg };
-        } else if (editingScope === 'song' && activeSong) {
-          updated.songs[activeSong.id] = { ...(updated.songs[activeSong.id] || {}), bgImage: nextBg };
-        } else if (editingScope === 'book' && activeSong?.book) {
-          updated.books[activeSong.book] = { ...(updated.books[activeSong.book] || {}), bgImage: nextBg };
-        }
-        return updated;
-      });
-    }
+  const handleUpdateTextSettings = (next: any) =>
+    updateScopeField('textSettings', typeof next === 'function' ? next(tbTextSettings) : next);
+
+  const handleUpdateBgImage = (next: any) =>
+    updateScopeField('bgImage', typeof next === 'function' ? next(tbBgImage) : next);
+
+  const handleUpdateBgFilters = (next: any) =>
+    updateScopeField('bgFilters', typeof next === 'function' ? next(tbBgFilters) : next);
+
+  const handleUpdateHeader = (next: any) =>
+    updateScopeField('header', typeof next === 'function' ? next(tbHeader) : next);
+
+  const handleUpdateTransition = (next: any) =>
+    updateScopeField('transition', typeof next === 'function' ? next(tbTransition) : next);
+
+  const handleUpdateParallel = (next: any) =>
+    updateScopeField('parallel', typeof next === 'function' ? next(tbParallel) : next);
+
+  /**
+   * Applique un thème à la portée en cours.
+   *
+   * Les mises à jour s'enchaînent sur le même état : React les applique dans
+   * l'ordre, chacune partant du résultat de la précédente. L'enregistrement
+   * final en localStorage contient donc bien les cinq champs.
+   */
+  const handleApplyTheme = (value: any) => {
+    if (!value) return;
+    if (value.textSettings) updateScopeField('textSettings', value.textSettings);
+    if (value.bgImage) updateScopeField('bgImage', value.bgImage);
+    if (value.bgFilters) updateScopeField('bgFilters', value.bgFilters);
+    if (value.header) updateScopeField('header', value.header);
+    if (value.transition) updateScopeField('transition', value.transition);
   };
 
   const clearSpecificSettings = () => {
@@ -664,9 +929,18 @@ function App() {
 
 
 
+  // Largeur des colonnes : glissable et retenue. Voir src/lib/panes.ts.
+  const [leftWidth, setLeftWidth, resetLeftWidth] = usePaneSize(PANES.left);
+  const [rightWidth, setRightWidth, resetRightWidth] = usePaneSize(PANES.right);
+
+  // Version biblique chargée : nécessaire pour ne pas se proposer soi-même
+  // dans la liste des versions supplémentaires.
+  const [activeBibleDb, setActiveBibleDb] = useState("");
+
   const loadDbData = async (category: string, dbName: string) => {
     setIsLoading(true);
     setActiveCategory(category);
+    if (category === "bible") setActiveBibleDb(dbName);
     try {
       if (category === "hymnes") {
         const result: any[] = await invoke("fetch_hymns", { dbName });
@@ -693,8 +967,12 @@ function App() {
       <UpdateBanner />
       <Toolbar
         setBgImage={handleUpdateBgImage}
+        bgImage={tbBgImage}
+        bgFilters={tbBgFilters}
+        setBgFilters={handleUpdateBgFilters}
         textSettings={tbTextSettings}
         setTextSettings={handleUpdateTextSettings}
+        sampleText={activeSong ? getSlides(activeSong, slideSplit)[activeVerseIdx] : undefined}
         isLiveActive={isLiveActive}
         handleLiveToggle={handleLiveToggle}
         editingScope={editingScope}
@@ -716,6 +994,30 @@ function App() {
         setClockSettings={setClockSettings}
         tickerSettings={tickerSettings}
         setTickerSettings={setTickerSettings}
+        headerSettings={tbHeader}
+        setHeaderSettings={handleUpdateHeader}
+        transition={tbTransition}
+        setTransition={handleUpdateTransition}
+        themeContext={tbContext}
+        onApplyTheme={handleApplyTheme}
+        parallel={tbParallel}
+        setParallel={handleUpdateParallel}
+        currentBibleDb={activeBibleDb}
+        slideSplit={slideSplit}
+        setSlideSplit={setSlideSplit}
+        announcements={announcements}
+        setAnnouncements={setAnnouncements}
+        stage={stage}
+        setStage={setStage}
+        isStageActive={isStageActive}
+        handleStageToggle={handleStageToggle}
+        timerStart={timerStart}
+        setTimerStart={setTimerStart}
+        liveStatus={{
+          title: projectedSong?.title || '',
+          slide: projectedVerseIdx,
+          slides: projectedSong ? getSlides(projectedSong, slideSplit).length : 0,
+        }}
         refreshCameras={refreshCameras}
         setOverlayColor={setOverlayColor}
         cameraError={cameraError}
@@ -723,6 +1025,7 @@ function App() {
 
       <div className="flex-1 flex min-h-0">
         <LeftSidebar
+          width={leftWidth}
           songs={songs}
           playlist={playlist}
           setPlaylist={setPlaylist}
@@ -730,7 +1033,7 @@ function App() {
             setActiveSong(song);
             let startIdx = 0;
             if (song.startVerse) {
-              const verses = getSlides(song);
+              const verses = getSlides(song, slideSplit);
               const foundIdx = verses.findIndex((v: string) => v.trim().startsWith(song.startVerse));
               if (foundIdx !== -1) startIdx = foundIdx;
             }
@@ -745,6 +1048,16 @@ function App() {
           toggleFavoriteDb={(category: string, db: string) => {
             setFavoriteDbs((prev: any) => ({ ...prev, [category]: prev[category] === db ? "" : db }));
           }}
+        />
+
+        <ResizeHandle
+          orientation="vertical"
+          value={leftWidth}
+          onChange={setLeftWidth}
+          min={PANES.left.min}
+          max={PANES.left.max}
+          onReset={resetLeftWidth}
+          title="Largeur de l'agenda et des listes · double-clic pour réinitialiser"
         />
 
         <MiddleEditor
@@ -772,11 +1085,24 @@ function App() {
           }}
         />
 
+        <ResizeHandle
+          orientation="vertical"
+          value={rightWidth}
+          onChange={setRightWidth}
+          min={PANES.right.min}
+          max={PANES.right.max}
+          invert
+          onReset={resetRightWidth}
+          title="Largeur de l'aperçu de projection · double-clic pour réinitialiser"
+        />
+
         <RightProjection
+          width={rightWidth}
           activeSong={activeSong}
           projectedSong={projectedSong}
           projectedVerseIdx={projectedVerseIdx}
           bgImage={computedLiveSettings.bgImage}
+          bgFilters={computedLiveSettings.bgFilters}
           textSettings={computedLiveSettings.textSettings}
           previewSettings={previewSettings.textSettings}
           previewBg={previewSettings.bgImage}
@@ -801,6 +1127,12 @@ function App() {
           activeCategory={activeCategory}
           ticker={tickerSettings}
           clock={clockSettings}
+          header={computedLiveSettings.header}
+          transition={computedLiveSettings.transition}
+          slideSplit={slideSplit}
+          parallels={parallelVerses}
+          parallelStyle={liveParallel}
+          onShrinkText={(size: number) => handleUpdateTextSettings({ ...tbTextSettings, fontSize: size })}
           mediaOverlay={null}
           isContentHidden={isContentHidden}
           isCameraActive={isCameraActive}

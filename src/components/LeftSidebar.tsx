@@ -1,16 +1,35 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
-import { Save, FolderOpen, X, BookOpen, Music, Search as SearchIcon, List, Download, Plus, Trash2, ChevronUp, ChevronDown, FileText, Image as ImageIcon, Video, Type, Library as LibraryIcon, Heart, Headphones, Youtube, Globe, FileCode } from 'lucide-react';
+import { useState, useEffect, useRef, useMemo, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { Save, FolderOpen, X, BookOpen, Music, Search as SearchIcon, List, Download, Plus, Trash2, ChevronUp, ChevronDown, FileText, Image as ImageIcon, Video, Type, Library as LibraryIcon, Heart, Headphones, Youtube, Globe, FileCode, Quote } from 'lucide-react';
 import { Library } from './library/Library';
 import Fuse from 'fuse.js';
 import { invoke } from '@tauri-apps/api/core';
+import { ResizeHandle } from './ResizeHandle';
+import { PANES, usePaneSize } from '../lib/panes';
+import { focusSlideList, NEXT_KEYS, PREV_KEYS } from '../lib/keys';
+import { BibleSearchResults, type BibleHit } from './BibleSearchResults';
 
-export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoading, onLoadDb, activeSong, searchFocusTrigger, favoriteDbs, toggleFavoriteDb }: any) {
+export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoading, onLoadDb, activeSong, searchFocusTrigger, favoriteDbs, toggleFavoriteDb, width }: any) {
   const searchRef = useRef<HTMLInputElement>(null);
   const [view, setView] = useState('chant'); // 'chant' | 'bible' | 'store'
   const [hymneSearchTerm, setHymneSearchTerm] = useState('');
   const [bibleSearchTerm, setBibleSearchTerm] = useState('');
-  const searchTerm = view === 'chant' ? hymneSearchTerm : bibleSearchTerm;
-  const setSearchTerm = (val: string) => view === 'chant' ? setHymneSearchTerm(val) : setBibleSearchTerm(val);
+  // Deux façons de chercher dans la Bible, donc deux saisies distinctes : on
+  // ne perd pas la référence en cours en allant vérifier un mot, et basculer
+  // d'un mode à l'autre ne relance pas la recherche de l'autre.
+  const [bibleMode, setBibleMode] = useState<'ref' | 'text'>('ref');
+  const [bibleTextTerm, setBibleTextTerm] = useState('');
+  const [bibleHits, setBibleHits] = useState<BibleHit[]>([]);
+  const [bibleSearching, setBibleSearching] = useState(false);
+  const [bibleSearchError, setBibleSearchError] = useState<string | null>(null);
+  const BIBLE_HIT_LIMIT = 300;
+
+  const isBibleTextSearch = view === 'bible' && bibleMode === 'text';
+  const searchTerm = view === 'chant'
+    ? hymneSearchTerm
+    : isBibleTextSearch ? bibleTextTerm : bibleSearchTerm;
+  const setSearchTerm = (val: string) => view === 'chant'
+    ? setHymneSearchTerm(val)
+    : isBibleTextSearch ? setBibleTextTerm(val) : setBibleSearchTerm(val);
   const [dbs, setDbs] = useState<string[]>([]);
   const [activeDb, setActiveDb] = useState("");
   // Bible specific state
@@ -28,6 +47,9 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
   } | null>(null);
   const [promptValue, setPromptValue] = useState('');
   const [promptError, setPromptError] = useState<string | null>(null);
+  // Hauteur de l'agenda : un culte à trois chants et un culte à quinze
+  // n'ont pas besoin de la même place. Retenue entre deux séances.
+  const [agendaHeight, setAgendaHeight, resetAgendaHeight] = usePaneSize(PANES.agenda);
 
   useEffect(() => {
     if (searchFocusTrigger > 0) {
@@ -102,9 +124,13 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
     ignoreLocation: true // match anywhere in the title (faster + better for long titles)
   }), [searchIndex]);
 
-  const searchResults = useMemo(() => searchTerm
-      ? fuse.search(searchTerm, { limit: 200 }).map(result => result.item)
-      : songs, [fuse, searchTerm, songs]);
+  // Fuse n'est utile qu'à la liste des recueils. Le lancer aussi en vue Bible
+  // faisait une recherche approchée sur 31 000 chapitres à chaque frappe de
+  // référence, pour un résultat que personne n'affiche.
+  const searchResults = useMemo(() => {
+    if (view !== 'chant') return songs;
+    return searchTerm ? fuse.search(searchTerm, { limit: 200 }).map(r => r.item) : songs;
+  }, [view, fuse, searchTerm, songs]);
 
   const getDbDisplayName = (db: string) => {
     const base = db.replace('.db', '').replace('.SQLite3', '');
@@ -136,8 +162,63 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
     [view, selectedBook, songs]
   );
 
+  // --- Recherche par mot / phrase -----------------------------------------
+  // Débounce : chaque appel balaie la base entière côté Rust. À 150 ms on
+  // lance une recherche par mot tapé ; à 300 ms on en lance une par mot écrit.
   useEffect(() => {
-    if (view === 'bible' && searchTerm.trim()) {
+    if (!isBibleTextSearch) return;
+    const query = bibleTextTerm.trim();
+    if (query.length < 2 || !activeDb) {
+      setBibleHits([]);
+      setBibleSearchError(null);
+      setBibleSearching(false);
+      return;
+    }
+    let cancelled = false;
+    setBibleSearching(true);
+    const timer = setTimeout(() => {
+      invoke<BibleHit[]>('search_bible', { dbName: activeDb, query, limit: BIBLE_HIT_LIMIT })
+        .then((hits) => {
+          if (cancelled) return;
+          setBibleHits(hits);
+          setBibleSearchError(null);
+        })
+        .catch((e) => {
+          if (cancelled) return;
+          setBibleHits([]);
+          setBibleSearchError(`Recherche impossible : ${e}`);
+        })
+        .finally(() => { if (!cancelled) setBibleSearching(false); });
+    }, 300);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [isBibleTextSearch, bibleTextTerm, activeDb]);
+
+  /**
+   * Ouvre le chapitre d'un résultat, positionné sur le bon verset.
+   * `startVerse` est le mécanisme déjà utilisé par la résolution de référence
+   * ("Jean 3:16") : la liste des diapos s'ouvre directement au verset.
+   */
+  const openBibleHit = (hit: BibleHit) => {
+    const chapterSong = songs.find(
+      (s: any) => s.book === hit.book && s.number === String(hit.chapter)
+    );
+    if (!chapterSong) {
+      setBibleSearchError(
+        `Le chapitre ${hit.book} ${hit.chapter} n'est pas dans la version chargée.`
+      );
+      return;
+    }
+    setSelectedBook(hit.book);
+    setSelectedChapter(String(hit.chapter));
+    onSelectSong({ ...chapterSong, startVerse: String(hit.verse) }, 'bible');
+    focusSlideList();
+  };
+
+  useEffect(() => {
+    // Uniquement en mode Référence : en mode Texte, « amour de Dieu » n'est
+    // pas une référence et la résolution sautait de chapitre en chapitre à
+    // chaque lettre tapée.
+    if (view === 'bible' && bibleMode === 'ref' && searchTerm.trim()) {
       // Le nom du livre peut commencer par un chiffre ET contenir une espace
       // ("1 Jaona"), ou être collé ("1Jao"). L'ancien motif exigeait des
       // caractères contigus, donc aucune référence en 1/2/3 ne fonctionnait.
@@ -168,12 +249,48 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
         }
       }
     }
-  }, [searchTerm, view, bibleBooks, songs]);
+  }, [searchTerm, view, bibleMode, bibleBooks, songs]);
 
   useEffect(() => {
     setSelectedBook("");
     setSelectedChapter("");
   }, [activeDb, view]);
+
+  /**
+   * Sortie du champ de recherche vers la navigation au clavier.
+   *
+   * Tant que le curseur reste dans le champ, les flèches sont (volontairement)
+   * ignorées par la projection. On rend donc la main explicitement :
+   *   Entrée  → prend le premier résultat et passe à la liste des diapos
+   *   Flèches → passe à la liste, et la touche est rejouée pour que le premier
+   *             appui déplace déjà la sélection
+   *   Échap   → quitte simplement le champ
+   */
+  const handleSearchKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      focusSlideList();
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      // En vue Bible par référence, la résolution a déjà sélectionné le
+      // chapitre pendant la frappe : il n'y a rien à choisir de plus.
+      if (view === 'chant' && searchResults.length > 0) {
+        onSelectSong(searchResults[0], 'hymnes');
+      } else if (isBibleTextSearch && bibleHits.length > 0) {
+        openBibleHit(bibleHits[0]);
+        return; // openBibleHit rend déjà la main au clavier
+      }
+      focusSlideList();
+      return;
+    }
+    if (NEXT_KEYS.includes(e.key) || PREV_KEYS.includes(e.key)) {
+      e.preventDefault();
+      focusSlideList();
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: e.key, bubbles: true }));
+    }
+  };
 
   const handleSaveAgenda = async () => {
     try {
@@ -481,7 +598,10 @@ Texte en **gras**, en *italique*, et une liste :
   };
 
   return (
-    <div className="w-80 bg-[#202225] h-full flex flex-col border-r border-[#18191c]">
+    <div
+      className="bg-[#202225] h-full flex flex-col shrink-0 min-w-0"
+      style={{ width: width ?? 320 }}
+    >
       {/* Custom Confirmation Modal Dialog */}
       {promptDialog && (
         <div
@@ -561,7 +681,10 @@ Texte en **gras**, en *italique*, et une liste :
           </div>
         </div>
       )}
-      <div className="flex-1 flex flex-col min-h-0 border-b border-[#18191c]">
+      <div
+        className="flex flex-col min-h-0 shrink-0"
+        style={{ height: agendaHeight }}
+      >
         <div className="p-2 bg-[#2b2d31] flex items-center justify-between border-b border-[#18191c]">
            <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-2 text-gray-300">
              <List size={14} /> Agenda
@@ -631,6 +754,16 @@ Texte en **gras**, en *italique*, et une liste :
       </div>
       </div>
 
+      <ResizeHandle
+        orientation="horizontal"
+        value={agendaHeight}
+        onChange={setAgendaHeight}
+        min={PANES.agenda.min}
+        max={PANES.agenda.max}
+        onReset={resetAgendaHeight}
+        title="Hauteur de l'agenda · double-clic pour réinitialiser"
+      />
+
       <div className="flex-1 flex flex-col min-h-0 bg-[#2f3136]">
         <div className="flex bg-[#202225] text-xs">
           <button className={`flex-1 py-2 font-bold border-b-2 transition flex items-center justify-center gap-1.5 ${view === 'chant' ? 'border-[#5865f2] text-white' : 'border-transparent text-gray-500 hover:text-gray-300'}`} onClick={() => setView('chant')}>
@@ -677,20 +810,61 @@ Texte en **gras**, en *italique*, et une liste :
                   )}
                   <button className="bg-[#5865f2] p-1.5 rounded hover:bg-[#4752c4] transition" title="Ouvrir la bibliothèque (recueils, bibles, documents, Mofon'aina, audio)" onClick={() => setView('store')}><Download size={14} /></button>
                 </div>
+                {view === 'bible' && (
+                  /* Deux manières de chercher : par référence quand on sait où
+                     aller, par mots quand on ne se rappelle que le texte. */
+                  <div className="flex items-center gap-1 rounded bg-[#1e1f22] p-0.5 text-[10px] font-bold">
+                    <button
+                      className={`flex flex-1 items-center justify-center gap-1 rounded py-1 transition ${bibleMode === 'ref' ? 'bg-[#5865f2] text-white' : 'text-gray-400 hover:text-gray-200'}`}
+                      onClick={() => setBibleMode('ref')}
+                      title="Aller à un livre, un chapitre, un verset (ex: Jean 3:16)"
+                    >
+                      <BookOpen size={11} /> Référence
+                    </button>
+                    <button
+                      className={`flex flex-1 items-center justify-center gap-1 rounded py-1 transition ${bibleMode === 'text' ? 'bg-[#5865f2] text-white' : 'text-gray-400 hover:text-gray-200'}`}
+                      onClick={() => { setBibleMode('text'); setTimeout(() => searchRef.current?.focus(), 0); }}
+                      title="Chercher un mot ou une phrase dans tout le texte biblique"
+                    >
+                      <Quote size={11} /> Texte
+                    </button>
+                  </div>
+                )}
                 <div className="relative">
                   <SearchIcon className="absolute left-2 top-2 text-gray-400" size={14} />
-                  <input ref={searchRef} type="text" placeholder={view === 'chant' ? "Rechercher un chant, un numéro..." : "Un livre, un chapitre (ex: Jean 3:16)..."} className="w-full bg-[#1e1f22] text-xs text-gray-200 border border-[#36393f] rounded py-1.5 pl-7 pr-2 outline-none" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+                  <input
+                    ref={searchRef}
+                    type="text"
+                    placeholder={
+                      view === 'chant' ? "Rechercher un chant, un numéro..."
+                        : bibleMode === 'text' ? 'Un mot, une phrase ("exacte")…'
+                          : "Un livre, un chapitre (ex: Jean 3:16)..."
+                    }
+                    className="w-full bg-[#1e1f22] text-xs text-gray-200 border border-[#36393f] rounded py-1.5 pl-7 pr-2 outline-none focus:border-[#5865f2]"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    onKeyDown={handleSearchKeyDown}
+                  />
                 </div>
               </div>
               <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
                 {view === 'chant' ? (
                   isLoading ? <div className="text-xs text-gray-400 text-center mt-4">Chargement...</div> : searchResults.map((song: any) => (
-                    <div key={song.id} style={{ contentVisibility: 'auto', containIntrinsicSize: '0 28px' } as any} className="px-2 py-1 rounded hover:bg-[#3f4147] cursor-pointer flex items-center gap-2 text-xs" onClick={() => onSelectSong(song, 'hymnes')}>
+                    <div key={song.id} style={{ contentVisibility: 'auto', containIntrinsicSize: '0 28px' } as any} className="px-2 py-1 rounded hover:bg-[#3f4147] cursor-pointer flex items-center gap-2 text-xs" onClick={() => { onSelectSong(song, 'hymnes'); focusSlideList(); }}>
                       <Music size={10} className="text-gray-500" />
                       <span className="text-gray-400 w-6 font-mono">{song.number}</span>
                       <span className="text-gray-300 truncate">{song.title}</span>
                     </div>
                   ))
+                ) : bibleMode === 'text' ? (
+                  <BibleSearchResults
+                    query={bibleTextTerm}
+                    hits={bibleHits}
+                    loading={bibleSearching}
+                    error={bibleSearchError}
+                    onPick={openBibleHit}
+                    truncated={bibleHits.length >= BIBLE_HIT_LIMIT}
+                  />
                 ) : (
                   !selectedBook ? (
                     <div className="grid grid-cols-2 gap-1.5">
@@ -707,7 +881,7 @@ Texte en **gras**, en *italique*, et une liste :
                            <button 
                              key={s.id} 
                              className={`text-xs py-2 rounded font-bold transition ${selectedChapter === s.number ? 'bg-[#5865f2] text-white shadow-md' : 'bg-[#1e1f22] text-gray-400 hover:bg-[#3f4147]'}`} 
-                             onClick={() => { setSelectedChapter(s.number); onSelectSong(s, 'bible'); }}
+                             onClick={() => { setSelectedChapter(s.number); onSelectSong(s, 'bible'); focusSlideList(); }}
                            >
                              {s.number}
                            </button>

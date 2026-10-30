@@ -451,6 +451,13 @@ pub struct Song {
     /// deutérocanoniques, la carte non.
     #[serde(default)]
     pub book_index: Option<i32>,
+    /// Numéro de livre au format MyBible (Genèse = 10, Exode = 20 … ).
+    /// C'est la SEULE clé commune entre deux versions : les noms de livres
+    /// changent d'une langue à l'autre (« Jaona » / « Jean » / « John »), et
+    /// le rang `book_index` se décale dès qu'un module contient les
+    /// deutérocanoniques. Indispensable à l'affichage multilingue.
+    #[serde(default)]
+    pub book_no: Option<i32>,
     /// Fichier de la version biblique chargée (ex: "MG65.SQLite3"), pour ne
     /// proposer l'audio malgache qu'avec le texte qui lui correspond.
     #[serde(default)]
@@ -510,6 +517,7 @@ fn fetch_hymns_blocking(app_handle: &tauri::AppHandle, db_name: &str) -> Result<
                 playback: playback.filter(|p| !p.trim().is_empty()),
                 abbr: None,
                 book_index: None,
+                book_no: None,
                 version: None,
             })
         })
@@ -559,7 +567,7 @@ fn fetch_bible_blocking(app_handle: &tauri::AppHandle, db_name: &str) -> Result<
     let mut stmt = conn
         .prepare(
             "
-        SELECT b.long_name, v.chapter, v.verse, v.text, b.short_name
+        SELECT b.long_name, v.chapter, v.verse, v.text, b.short_name, v.book_number
         FROM verses v
         JOIN books b ON v.book_number = b.book_number
         ORDER BY v.book_number, v.chapter, v.verse
@@ -569,6 +577,7 @@ fn fetch_bible_blocking(app_handle: &tauri::AppHandle, db_name: &str) -> Result<
 
     let mut current_book = String::new();
     let mut current_abbr: Option<String> = None;
+    let mut current_book_no: Option<i32> = None;
     // Rang du livre en cours (1..66), incrémenté à chaque changement de livre.
     let mut current_index: i32 = 0;
     let mut current_chapter = 0;
@@ -585,6 +594,7 @@ fn fetch_bible_blocking(app_handle: &tauri::AppHandle, db_name: &str) -> Result<
         let chapter: i32 = row.get(1).map_err(|e| e.to_string())?;
         let verse: i32 = row.get(2).map_err(|e| e.to_string())?;
         let text: String = row.get(3).map_err(|e| e.to_string())?;
+        let book_no: i32 = row.get(5).map_err(|e| e.to_string())?;
 
         let title = format!("{} {}", book_name, chapter);
         if current_title != title {
@@ -598,6 +608,7 @@ fn fetch_bible_blocking(app_handle: &tauri::AppHandle, db_name: &str) -> Result<
                     playback: None, // pas d'audio associé pour la Bible
                     abbr: current_abbr.clone(),
                     book_index: Some(current_index),
+                    book_no: current_book_no,
                     version: Some(db_name.to_string()),
                 });
                 current_id += 1;
@@ -608,6 +619,7 @@ fn fetch_bible_blocking(app_handle: &tauri::AppHandle, db_name: &str) -> Result<
             }
             current_book = book_name;
             current_abbr = book_abbr;
+            current_book_no = Some(book_no);
             current_chapter = chapter;
             current_content = format!("{}\n{}", verse, text);
         } else {
@@ -624,11 +636,274 @@ fn fetch_bible_blocking(app_handle: &tauri::AppHandle, db_name: &str) -> Result<
             playback: None,
             abbr: current_abbr,
             book_index: Some(current_index),
+            book_no: current_book_no,
             version: Some(db_name.to_string()),
         });
     }
 
     Ok(songs)
+}
+
+// ---------------------------------------------------------------------------
+// Recherche plein texte dans la Bible
+//
+// La barre de recherche ne savait résoudre qu'une RÉFÉRENCE ("Jean 3:16").
+// Retrouver un verset dont on ne se rappelle que quelques mots — le cas le
+// plus courant en préparation — obligeait à le chercher ailleurs.
+//
+// Pourquoi côté Rust et non en JavaScript : le texte complet est déjà chargé
+// dans l'interface, mais normaliser 31 000 versets à chaque frappe gèle le
+// webview. Ici c'est un balayage SQLite sur un thread bloquant, invisible.
+//
+// Pourquoi pas la recherche plein texte de SQLite (FTS5) : les fichiers
+// MyBible n'ont pas de table FTS, et en créer une modifierait des bases que
+// l'utilisateur peut avoir téléchargées ou sauvegardées.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+pub struct BibleHit {
+    pub book: String,
+    pub abbr: Option<String>,
+    pub chapter: i32,
+    pub verse: i32,
+    /// Texte débarrassé de son balisage, tel qu'il sera affiché.
+    pub text: String,
+}
+
+/// Minuscules et accents retirés, pour que « Jéhovah » se trouve en tapant
+/// « jehovah ». `to_lowercase` ne suffit pas : il conserve les diacritiques.
+fn fold(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars().flat_map(|c| c.to_lowercase()) {
+        match c {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' => out.push('a'),
+            'æ' => out.push_str("ae"),
+            'ç' | 'ć' | 'č' => out.push('c'),
+            'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ė' => out.push('e'),
+            'ì' | 'í' | 'î' | 'ï' | 'ī' => out.push('i'),
+            'ñ' | 'ń' => out.push('n'),
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' => out.push('o'),
+            'œ' => out.push_str("oe"),
+            'š' | 'ś' => out.push('s'),
+            'ù' | 'ú' | 'û' | 'ü' | 'ū' => out.push('u'),
+            'ý' | 'ÿ' => out.push('y'),
+            'ž' | 'ź' => out.push('z'),
+            // Apostrophes typographiques : « Andriamanitra'ny » doit se
+            // trouver avec l'apostrophe droite du clavier.
+            '\u{2018}' | '\u{2019}' | '\u{02bc}' => out.push('\''),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Retire le balisage des bases MyBible (`<S>` Strong, `<pb/>`, `<f>` notes…).
+/// Sans ça, un verset affiché dans les résultats montrait ses numéros Strong.
+fn strip_markup(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut depth = 0usize;
+    for c in input.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    // Les balises laissent des espaces en double une fois supprimées.
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Les termes que le verset doit contenir, déjà normalisés.
+/// Entre guillemets, la saisie est traitée comme une seule expression exacte.
+fn search_terms(query: &str) -> Vec<String> {
+    let folded = fold(query.trim());
+    let quoted = folded.len() >= 2 && folded.starts_with('"') && folded.ends_with('"');
+    if quoted {
+        let phrase = folded.trim_matches('"').trim().to_string();
+        return if phrase.is_empty() { vec![] } else { vec![phrase] };
+    }
+    folded
+        .split_whitespace()
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_string())
+        .collect()
+}
+
+#[tauri::command]
+async fn search_bible(
+    app_handle: tauri::AppHandle,
+    db_name: String,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<BibleHit>, String> {
+    safe_component(&db_name)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        search_bible_blocking(&app_handle, &db_name, &query, limit.unwrap_or(300))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn search_bible_blocking(
+    app_handle: &tauri::AppHandle,
+    db_name: &str,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<BibleHit>, String> {
+    let terms = search_terms(query);
+    // Un seul caractère renverrait la Bible entière : ce n'est pas une
+    // recherche, et construire la réponse coûterait plus que de ne rien faire.
+    if terms.is_empty() || terms.iter().all(|t| t.chars().count() < 2) {
+        return Ok(Vec::new());
+    }
+
+    let mut db_path = get_data_root(app_handle)?;
+    db_path.push("data");
+    db_path.push("bible");
+    db_path.push(db_name);
+
+    if !db_path.exists() {
+        return Err(format!("Database not found at {:?}", db_path));
+    }
+
+    let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "
+        SELECT b.long_name, b.short_name, v.chapter, v.verse, v.text
+        FROM verses v
+        JOIN books b ON v.book_number = b.book_number
+        ORDER BY v.book_number, v.chapter, v.verse
+    ",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    let mut hits = Vec::new();
+
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let raw: String = row.get(4).map_err(|e| e.to_string())?;
+        let text = strip_markup(&raw);
+        let folded = fold(&text);
+        if !terms.iter().all(|t| folded.contains(t.as_str())) {
+            continue;
+        }
+        hits.push(BibleHit {
+            book: row.get(0).map_err(|e| e.to_string())?,
+            abbr: row.get(1).unwrap_or(None),
+            chapter: row.get(2).map_err(|e| e.to_string())?,
+            verse: row.get(3).map_err(|e| e.to_string())?,
+            text,
+        });
+        // On s'arrête net : au-delà, la liste n'est plus lisible et le
+        // balayage complet d'un mot très courant coûterait pour rien.
+        if hits.len() >= limit {
+            break;
+        }
+    }
+
+    Ok(hits)
+}
+
+// ---------------------------------------------------------------------------
+// Affichage multilingue : le même passage dans plusieurs versions
+//
+// Pour une assemblée mélangée, projeter le verset en malgache ET en français
+// évite d'avoir à choisir. Les versions sont alignées sur `book_number`, la
+// numérotation MyBible : c'est la seule clé commune, puisque les noms de
+// livres changent d'une langue à l'autre.
+//
+// On ne recharge PAS la version entière pour afficher un verset : charger une
+// bible complète prend plusieurs centaines de millisecondes, ce qui se verrait
+// à chaque changement de diapo.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+pub struct ParallelVerse {
+    /// Fichier de la version, tel que passé en entrée (ex: "Louis_Segond.SQLite3").
+    pub version: String,
+    /// Nom du livre DANS CETTE VERSION (« Jean » là où le malgache dit « Jaona »).
+    pub book: String,
+    pub chapter: i32,
+    pub verse: i32,
+    pub text: String,
+}
+
+#[tauri::command]
+async fn fetch_parallel_verse(
+    app_handle: tauri::AppHandle,
+    db_names: Vec<String>,
+    book_no: i32,
+    chapter: i32,
+    verse: i32,
+) -> Result<Vec<ParallelVerse>, String> {
+    for name in &db_names {
+        safe_component(name)?;
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut out = Vec::new();
+        for db_name in &db_names {
+            // Une version absente ou abîmée ne doit pas faire disparaître les
+            // autres : on la saute en silence, la projection continue.
+            match parallel_verse_blocking(&app_handle, db_name, book_no, chapter, verse) {
+                Ok(Some(v)) => out.push(v),
+                Ok(None) => {}
+                Err(e) => eprintln!("fetch_parallel_verse({db_name}): {e}"),
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn parallel_verse_blocking(
+    app_handle: &tauri::AppHandle,
+    db_name: &str,
+    book_no: i32,
+    chapter: i32,
+    verse: i32,
+) -> Result<Option<ParallelVerse>, String> {
+    let mut db_path = get_data_root(app_handle)?;
+    db_path.push("data");
+    db_path.push("bible");
+    db_path.push(db_name);
+    if !db_path.exists() {
+        return Ok(None);
+    }
+
+    let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "
+        SELECT b.long_name, v.text
+        FROM verses v
+        JOIN books b ON v.book_number = b.book_number
+        WHERE v.book_number = ?1 AND v.chapter = ?2 AND v.verse = ?3
+        LIMIT 1
+    ",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let mut rows = stmt
+        .query(rusqlite::params![book_no, chapter, verse])
+        .map_err(|e| e.to_string())?;
+
+    if let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let book: String = row.get(0).map_err(|e| e.to_string())?;
+        let raw: String = row.get(1).map_err(|e| e.to_string())?;
+        return Ok(Some(ParallelVerse {
+            version: db_name.to_string(),
+            book,
+            chapter,
+            verse,
+            // Même nettoyage que la recherche : sans lui, les numéros Strong
+            // des modules annotés s'afficheraient en projection.
+            text: strip_markup(&raw),
+        }));
+    }
+    Ok(None)
 }
 
 #[tauri::command]
@@ -2324,6 +2599,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             fetch_hymns,
             fetch_bible,
+            search_bible,
+            fetch_parallel_verse,
             update_song,
             list_dbs,
             download_db,

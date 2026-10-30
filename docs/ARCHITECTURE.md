@@ -7,12 +7,24 @@ pièges déjà rencontrés : ils ont l'air d'erreurs mais sont volontaires.
 
 ## 1. Les deux fenêtres
 
-L'application ouvre **deux fenêtres qui exécutent le même code** :
+L'application ouvre jusqu'à **trois fenêtres qui exécutent le même code** :
 
-| Fenêtre | URL | Rôle |
-|---|---|---|
-| Contrôle | `/` | Ce que voit l'opérateur |
-| Projection | `/?live=true` | Ce que voit l'assemblée |
+| Fenêtre | URL | Rôle | Ouverture |
+|---|---|---|---|
+| Contrôle | `/` | Ce que voit l'opérateur | au démarrage |
+| Projection | `/?live=true` | Ce que voit l'assemblée | à la demande |
+| Écran retour | `/?stage=true` | Ce que voient les musiciens | à la demande |
+
+**⚠ La troisième fenêtre n'existe jamais par défaut.** Beaucoup d'églises n'ont
+pas d'écran de retour ; en ouvrir un sans qu'on l'ait demandé encombrerait le
+poste de l'opérateur. Même règle pour les annonces défilantes et le découpage
+automatique : ils existent, ils sont éteints.
+
+L'écran retour ne reçoit QUE des évènements (`update_stage`) : ni base de
+données, ni média. Une fenêtre de confort ne doit jamais être ce qui ralentit
+la projection. Il est volontairement ouvert en fenêtre **normale** : on ne sait
+pas sur quel moniteur l'écran de retour est branché, et deviner mal
+reviendrait à voler l'écran de projection.
 
 `App.tsx` lit ce paramètre au démarrage (`isLiveMode`) et rend `LiveView` au
 lieu de l'interface complète. La fenêtre de projection est créée à la demande
@@ -128,6 +140,21 @@ Le nettoyage retire l'attribut `src` pour libérer le pipeline GStreamer. Si
 changé de son point de vue) — et sous `StrictMode`, qui monte les effets deux
 fois, la vidéo resterait définitivement vide.
 
+**⚠ `play()` ne répare pas tout — il faut parfois RECHARGER.** Deux pannes
+laissent un fond vidéo figé sans que rien ne les signale, et expliquent les
+démarrages ratés « de temps en temps » :
+
+- l'élément est en **erreur** (le serveur média n'était pas encore prêt quand la
+  fenêtre de projection s'est ouverte) : `play()` sur un élément en erreur ne
+  fait rien, il faut relire la source ;
+- l'élément se dit **en lecture** mais le pipeline a calé : `paused` vaut
+  `false`, donc une surveillance qui teste `el.paused` conclut que tout va bien.
+
+La surveillance de `forceBackgroundPlayback` suit donc la progression réelle de
+`currentTime` et recharge, au maximum cinq fois — au-delà, c'est un codec
+manquant, et recharger en boucle ne ferait que chauffer le processeur pendant
+le culte. Le compteur se remet à zéro dès que la lecture repart.
+
 **⚠ `removeAttribute("src")` doit être suivi de `load()`.** Sinon l'élément
 garde la position de lecture précédente : c'est ce qui faisait démarrer Genèse 1
 au verset 21.
@@ -193,7 +220,92 @@ styles par défaut, il faut donc les redonner explicitement.
 
 ---
 
-## 8. Télécommande (port 11224)
+## 8. Apparence d'une diapo : une cascade, cinq blocs
+
+Un réglage de projection se décompose en cinq blocs, tous soumis à la même
+cascade de portées (catégorie → livre → chant → diapo, le plus précis gagne,
+`getComputedSettingsForVerse` dans `App.tsx`) :
+
+| Bloc | Où | Ce qu'il règle |
+|---|---|---|
+| `textSettings` | — | police, taille, couleur, alignement, ombre |
+| `bgImage` | — | le fichier de fond |
+| `bgFilters` | `src/lib/bgStyle.ts` | luminosité, contraste, flou, voile |
+| `header` | `src/lib/header.ts` | la référence affichée par-dessus la diapo |
+| `transition` | `src/lib/transitions.ts` | l'effet au changement de diapo |
+| `parallel` | `src/lib/parallel.ts` | versions bibliques affichées en plus |
+
+Ajouter un bloc = l'ajouter aux quatre endroits de la cascade et à
+`updateScopeField`. Les cinq passent par ce seul chemin : une correction sur
+l'un profite aux autres.
+
+**⚠ `header` et `transition` ont été globaux, et c'était une erreur.** Un
+cantique et un verset n'ont pas besoin de la même référence ni du même effet.
+Un thème (`src/lib/themes.ts`) enregistre un instantané des cinq blocs.
+
+**⚠ La transition voyage dans le payload de `update_live_content`,** pas dans
+son propre évènement : c'est la diapo qui ARRIVE qui décide de la façon dont
+elle arrive. Un évènement séparé pourrait être traité un cycle plus tard, et
+la diapo s'afficherait avec l'effet de la précédente.
+
+**⚠ Le flou agrandit l'image.** Flouter mélange les bords avec le vide et
+dessine un cadre délavé : `bgMediaStyle()` compense par un `scale`, et le
+conteneur du fond doit donc porter `overflow-hidden`.
+
+**⚠ Le flou est en `vmin`, pas en pixels.** Le mini-moniteur fait 400 px de
+large, l'écran de projection 1920 : en pixels, le même réglage serait
+invisible d'un côté et énorme de l'autre, et l'aperçu mentirait.
+
+L'**entête** (la référence par-dessus la diapo) est globale, pas par portée :
+`src/lib/header.ts`. Elle était auparavant codée en dur dans `LiveView` — en
+haut à droite, exactement là où se place l'horloge par défaut.
+`headerOffsetPercent()` l'écarte maintenant de l'horloge et du bandeau.
+`ProjectionHeader` est rendue **par les deux fenêtres** : c'est volontaire,
+puisque c'est précisément ce qu'on ne pouvait pas juger avant de projeter.
+
+---
+
+## 9. Polices
+
+Elles sont **embarquées**, pas téléchargées : `public/fonts/*.woff2`, déclarées
+dans `src/fonts.css`, régénérés par `node scripts/fetch-fonts.mjs` (seule
+commande à relancer pour ajouter une famille, après l'avoir ajoutée à `FAMILIES`
+**et** à `FONTS` dans `src/lib/fonts.ts`).
+
+Avant, un `<link>` pointait vers fonts.googleapis.com. Sans réseau le jour d'un
+culte, la projection retombait sur une police système : la mise en page
+préparée la veille n'était plus la même. La CSP n'autorise donc plus aucune
+origine de police distante.
+
+**⚠ WebKitGTK ignore `font-family` sur une `<option>`.** D'où `FontPicker`, un
+menu maison : avec trente-deux familles, une liste de noms sans aperçu
+obligeait à projeter pour voir le résultat.
+
+---
+
+## 10. Recherche biblique
+
+Deux modes dans l'onglet Bible :
+
+- **Référence** — `Jean 3:16` est résolu côté interface (`LeftSidebar`), par
+  comparaison de formes normalisées et de `books.short_name`.
+- **Texte** — commande Rust `search_bible`, qui balaie les ~31 000 versets, en
+  retire le balisage MyBible (`<S>`, `<pb/>`…) et compare des formes sans
+  accents ni casse. Tous les mots doivent être présents ; entre guillemets, la
+  saisie vaut pour une expression exacte.
+
+Pourquoi en Rust alors que le texte est déjà en mémoire côté interface :
+normaliser 31 000 versets à chaque frappe gèle le webview. Pourquoi pas FTS5 :
+les fichiers MyBible n'ont pas de table de recherche, et en créer une
+modifierait des bases que l'utilisateur a téléchargées ou sauvegardées.
+
+**⚠ `fold()` existe en double** — `src-tauri/src/lib.rs` filtre, `src/lib/fold.ts`
+surligne. Si l'une change, changer l'autre, sinon un mot trouvé n'est pas mis
+en évidence.
+
+---
+
+## 11. Télécommande (port 11224)
 
 Désactivée par défaut. Une fois activée (Bibliothèque → Télécommande), un
 serveur écoute sur `0.0.0.0:11224` et sert une page mobile autonome. L'accès est
@@ -205,7 +317,7 @@ depuis un webview, et le Wi-Fi local couvre le besoin sans appairage.
 
 ---
 
-## 9. Mise à jour
+## 12. Mise à jour
 
 Voir [RELEASE.md](RELEASE.md). Principe côté application : on vérifie, on
 propose, on n'installe jamais tout seul. Une projection ne doit pas être

@@ -24,7 +24,9 @@ Quatre documents, à lire selon le besoin :
 ## Fonctionnalités
 
 **Contenus**
-- Bible avec recherche par référence (`Jean 3:16`, `1Jao.3.16`, `Gen 1`)
+- Bible avec recherche par référence (`Jean 3:16`, `1Jao.3.16`, `Gen 1`) **ou
+  par mot et par phrase** (`"fitiavana lehibe"`), accents et majuscules ignorés
+- Bible multilingue : le même verset dans deux versions ou plus, à l'écran
 - Recueils de chants, recherche plein texte et par numéro
 - Agenda (ordre du culte) : chants, versets, textes libres, Markdown, images,
   vidéos, audio, PDF, YouTube, liens web
@@ -34,11 +36,25 @@ Quatre documents, à lire selon le besoin :
 **Projection**
 - Fenêtre de projection indépendante, plein écran sur le second moniteur
 - Aperçu opérateur, horloge, bandeau défilant, écran noir / blanc, masquage
-- Fonds image ou vidéo (lecture automatique en boucle)
+- Fonds image ou vidéo (lecture automatique en boucle), avec réglage de la
+  luminosité, du flou et d'un voile pour que le texte reste lisible
+- Entête de projection configurable (position, taille, police, couleur)
+- Transitions entre diapos : fondu, fondu au noir, glissements, zoom, flou
+- Thèmes : enregistrer une apparence complète sous un nom, la rappeler d'un clic
+- Alerte quand une diapo déborde de l'écran, avec ajustement en un clic
+- Écran retour pour l'estrade : strophe en cours, suivante, horloge, chronomètre
+- Annonces défilantes sur l'écran d'accueil, avant le culte
+- Découpage automatique des diapos trop longues
+
+Ces trois derniers sont **désactivés par défaut** : rien ne s'ouvre et rien ne
+change tant que vous ne l'avez pas demandé.
+- 32 familles de polices embarquées — elles fonctionnent **hors ligne**
 - Caméra en arrière-plan
 - Audio associé : playback d'un cantique, chapitre de la Bible malgache
 
 **Autour**
+- Colonnes redimensionnables au glisser-déposer (double-clic pour réinitialiser)
+- Prochaine diapo en aperçu, et saut direct en tapant un numéro
 - Télécommande depuis un téléphone sur le même réseau Wi-Fi
 - Historique des chants projetés, sauvegarde du profil
 - Check système (codecs, écrans, serveur média, espace disque)

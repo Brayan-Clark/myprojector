@@ -1,4 +1,8 @@
 @import "tailwindcss";
+/* Polices embarquées (public/fonts). Voir scripts/fetch-fonts.mjs.
+   Elles ne viennent PLUS de fonts.googleapis.com : sans réseau, la projection
+   gardait l'apparence d'une police système au lieu de celle choisie. */
+@import "./fonts.css";
 
 @theme {
   --font-inter: "Inter", sans-serif;
@@ -48,6 +52,74 @@ embed, object, iframe {
   height: 100%;
   display: block;
 }
+
+/* ---------------------------------------------------------------------------
+   Transitions entre diapos — voir src/lib/transitions.ts
+
+   On n'anime que `opacity`, `transform` et `filter`. Le compositing de
+   WebKitGTK est désactivé (fenêtre noire sinon) : toute animation qui touche
+   à la géométrie relancerait un calcul de mise en page à chaque image, et la
+   projection saccaderait.
+
+   La durée est injectée par le composant (`animation-duration` en style),
+   d'où l'absence de durée ici.
+--------------------------------------------------------------------------- */
+.slide-layer {
+  animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  animation-fill-mode: both;
+}
+
+@keyframes slide-fade-in { from { opacity: 0 } to { opacity: 1 } }
+@keyframes slide-fade-out { from { opacity: 1 } to { opacity: 0 } }
+.slide-anim-fade-in { animation-name: slide-fade-in }
+.slide-anim-fade-out { animation-name: slide-fade-out }
+
+/* Fondu au noir : la diapo sortante s'efface sur la première moitié, l'entrante
+   apparaît sur la seconde. Le voile noir est posé par le composant. */
+@keyframes slide-fade-black-in { 0%, 50% { opacity: 0 } 100% { opacity: 1 } }
+@keyframes slide-fade-black-out { 0% { opacity: 1 } 50%, 100% { opacity: 0 } }
+.slide-anim-fade-black-in { animation-name: slide-fade-black-in }
+.slide-anim-fade-black-out { animation-name: slide-fade-black-out }
+
+@keyframes slide-left-in { from { opacity: 0; transform: translateX(8%) } to { opacity: 1; transform: none } }
+@keyframes slide-left-out { from { opacity: 1; transform: none } to { opacity: 0; transform: translateX(-8%) } }
+.slide-anim-slide-left-in { animation-name: slide-left-in }
+.slide-anim-slide-left-out { animation-name: slide-left-out }
+
+@keyframes slide-right-in { from { opacity: 0; transform: translateX(-8%) } to { opacity: 1; transform: none } }
+@keyframes slide-right-out { from { opacity: 1; transform: none } to { opacity: 0; transform: translateX(8%) } }
+.slide-anim-slide-right-in { animation-name: slide-right-in }
+.slide-anim-slide-right-out { animation-name: slide-right-out }
+
+@keyframes slide-up-in { from { opacity: 0; transform: translateY(6%) } to { opacity: 1; transform: none } }
+@keyframes slide-up-out { from { opacity: 1; transform: none } to { opacity: 0; transform: translateY(-6%) } }
+.slide-anim-slide-up-in { animation-name: slide-up-in }
+.slide-anim-slide-up-out { animation-name: slide-up-out }
+
+@keyframes slide-down-in { from { opacity: 0; transform: translateY(-6%) } to { opacity: 1; transform: none } }
+@keyframes slide-down-out { from { opacity: 1; transform: none } to { opacity: 0; transform: translateY(6%) } }
+.slide-anim-slide-down-in { animation-name: slide-down-in }
+.slide-anim-slide-down-out { animation-name: slide-down-out }
+
+@keyframes slide-zoom-in-in { from { opacity: 0; transform: scale(0.94) } to { opacity: 1; transform: none } }
+@keyframes slide-zoom-in-out { from { opacity: 1; transform: none } to { opacity: 0; transform: scale(1.06) } }
+.slide-anim-zoom-in-in { animation-name: slide-zoom-in-in }
+.slide-anim-zoom-in-out { animation-name: slide-zoom-in-out }
+
+@keyframes slide-zoom-out-in { from { opacity: 0; transform: scale(1.06) } to { opacity: 1; transform: none } }
+@keyframes slide-zoom-out-out { from { opacity: 1; transform: none } to { opacity: 0; transform: scale(0.94) } }
+.slide-anim-zoom-out-in { animation-name: slide-zoom-out-in }
+.slide-anim-zoom-out-out { animation-name: slide-zoom-out-out }
+
+@keyframes slide-blur-in { from { opacity: 0; filter: blur(0.8vmin) } to { opacity: 1; filter: none } }
+@keyframes slide-blur-out { from { opacity: 1; filter: none } to { opacity: 0; filter: blur(0.8vmin) } }
+.slide-anim-blur-in { animation-name: slide-blur-in }
+.slide-anim-blur-out { animation-name: slide-blur-out }
+
+/* Voile du « fondu au noir » : noir au milieu de la transition, transparent aux
+   deux extrémités. */
+@keyframes slide-black-veil { 0% { opacity: 0 } 50% { opacity: 1 } 100% { opacity: 0 } }
+.slide-black-veil { animation-name: slide-black-veil }
 
 /* ---------------------------------------------------------------------------
    Rendu Markdown (agenda de type « markdown »)

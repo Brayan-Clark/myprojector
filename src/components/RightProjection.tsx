@@ -1,19 +1,27 @@
-import { useState, useEffect, useRef } from 'react';
-import { Star, AlertCircle, Presentation, MonitorOff, Headphones, Youtube, Globe, FileText, Camera, ChevronLeft, ChevronRight, Film, Gauge } from 'lucide-react';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { Star, AlertCircle, AlertTriangle, Presentation, MonitorOff, Headphones, Youtube, Globe, FileText, Camera, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Film, Gauge } from 'lucide-react';
 import { cleanUrl } from '../lib/media';
 import { PdfViewer } from './PdfViewer';
 import { MarkdownView } from './MarkdownView';
 import { getSlides } from '../lib/slides';
-import { NEXT_KEYS, PREV_KEYS, isTypingTarget } from '../lib/keys';
+import { NEXT_KEYS, PREV_KEYS, isTypingTarget, focusSlideList, SLIDE_LIST_ID } from '../lib/keys';
 import { BackgroundVideo } from './BackgroundVideo';
 import { ProjectedVideo } from './ProjectedVideo';
+import { ProjectionHeader } from './ProjectionHeader';
+import { buildHeaderText, withHeaderDefaults } from '../lib/header';
+import { bgMediaStyle, veilStyle, textShadowCss } from '../lib/bgStyle';
+import { fontStack } from '../lib/fonts';
+import { SlideTransition } from './SlideTransition';
+import { keepsPreviousLayer } from '../lib/transitions';
+import { fittingFontSize, useOverflow } from '../lib/overflow';
 
 export function RightProjection({ 
   activeSong, projectedSong, projectedVerseIdx, bgImage, textSettings, 
   isLiveActive, activeVerseIdx, setActiveVerseIdx, onProject, isBaseScreenProjected,
   setIsBaseScreenProjected, ticker, clock, isContentHidden, isCameraActive, selectedCamera, currentTime,
   overlayColor,
-  projectedPdfPage, commandProjectedPage, projectedNumPages, setProjectedNumPages
+  projectedPdfPage, commandProjectedPage, projectedNumPages, setProjectedNumPages,
+  width, bgFilters, header, transition, activeCategory, parallels, parallelStyle, onShrinkText, slideSplit
 }: any) {
   const isProjectedPdf = projectedSong?.type === 'document' && /\.pdf(\?.*)?$/i.test(projectedSong?.lyrics || "");
 
@@ -22,8 +30,70 @@ export function RightProjection({
     commandProjectedPage?.(Math.min(Math.max(1, next), total));
   };
   const [projectedLines, setProjectedLines] = useState<string[]>([]);
+
+  // La vignette est en 16/9 : sa hauteur découle de la largeur de la colonne.
+  // C'est l'échelle qui permet de reproduire fidèlement des tailles exprimées
+  // en pourcentage de la hauteur d'écran.
+  const previewHeight = Math.round((width ?? 384) * 9 / 16);
+
+  // Débordement : l'aperçu reproduit les proportions de l'écran, on peut donc
+  // savoir AVANT de projeter qu'une diapo ne tiendra pas.
+  const [overflowRef, overflow] = useOverflow([
+    projectedLines, parallels, previewHeight,
+    textSettings?.fontSize, textSettings?.lineHeight, textSettings?.contentWidth,
+    textSettings?.fontFamily, parallelStyle?.sizeFactor,
+  ]);
+
+  // Mémorisé pour la même raison que dans LiveView : `BackgroundVideo` est un
+  // composant `memo`, un objet de style neuf à chaque rendu l'annule.
+  const bgFilterStyle = useMemo(() => bgMediaStyle(bgFilters), [bgFilters]);
+  const bgVeilStyle = useMemo(() => veilStyle(bgFilters), [bgFilters]);
+
+  // Entête telle qu'elle partira à l'écran. Jusqu'ici l'aperçu ne l'affichait
+  // pas : on ne découvrait un chevauchement avec l'horloge qu'en projetant.
+  const projectedIsBible = projectedSong?.type === 'bible' || activeCategory === 'bible';
+  const headerConf = withHeaderDefaults(header);
+  const headerText = (!isBaseScreenProjected && projectedSong && headerConf.enabled)
+    ? buildHeaderText(
+        headerConf,
+        projectedSong,
+        projectedIsBible,
+        projectedLines[0]?.match(/^(\d+)/)?.[1]
+      )
+    : '';
+  /**
+   * Lignes réellement projetées.
+   *
+   * Quand la référence part dans l'entête, la fenêtre de projection retire le
+   * numéro de verset du corps du texte (il serait affiché deux fois). L'aperçu
+   * ne le faisait pas : il montrait un « 2 » que l'assemblée ne verrait jamais.
+   * On applique ici la même règle, à partir des lignes BRUTES — dont on a
+   * encore besoin plus haut pour construire la référence.
+   */
+  const displayLines = useMemo(() => {
+    if (projectedIsBible && headerText && projectedLines.length > 1
+        && /^\d+$/.test(projectedLines[0].trim())) {
+      return projectedLines.slice(1);
+    }
+    return projectedLines;
+  }, [projectedLines, projectedIsBible, headerText]);
+
+  // Prochaine diapo : réglage d'affichage, retenu d'une séance à l'autre.
+  const [showNext, setShowNext] = useState(
+    () => localStorage.getItem('showNextSlide') === '1'
+  );
+  useEffect(() => {
+    localStorage.setItem('showNextSlide', showNext ? '1' : '0');
+  }, [showNext]);
+
   const previewVideoRef = useRef<HTMLVideoElement>(null);
-  const verses = activeSong ? getSlides(activeSong) : [];
+  const verses = activeSong ? getSlides(activeSong, slideSplit) : [];
+
+  // Ce qui arrivera au prochain appui sur la flèche. Vide sur la dernière
+  // diapo : la flèche ramène alors à l'écran d'accueil.
+  const nextSlideText = activeVerseIdx >= 0 && activeVerseIdx < verses.length - 1
+    ? verses[activeVerseIdx + 1]
+    : '';
 
   useEffect(() => {
     if (activeSong) {
@@ -43,13 +113,13 @@ export function RightProjection({
   
   useEffect(() => {
     if (projectedSong) {
-      const pVerses = getSlides(projectedSong);
+      const pVerses = getSlides(projectedSong, slideSplit);
       const lines = pVerses[projectedVerseIdx]?.split('\n') || [];
       setProjectedLines(lines);
     } else {
       setProjectedLines([]);
     }
-  }, [projectedSong, projectedVerseIdx]);
+  }, [projectedSong, projectedVerseIdx, slideSplit]);
 
   // Auto-scroll the list to keep the selection visible
   useEffect(() => {
@@ -61,11 +131,57 @@ export function RightProjection({
     }
   }, [activeVerseIdx]);
 
+  /**
+   * Saut direct : on tape le numéro de la diapo, Entrée valide.
+   *
+   * Pendant un culte, « strophe 4 » arrive sans prévenir. Avant, il fallait
+   * appuyer trois fois sur la flèche ou viser à la souris dans la liste.
+   * Les chiffres ne servaient à rien d'autre hors champ de saisie : c'est la
+   * frappe qui ouvre la saisie, sans bouton à chercher.
+   */
+  const [jumpInput, setJumpInput] = useState<string | null>(null);
+  const jumpTimer = useRef<number | undefined>(undefined);
+
+  const armJumpReset = () => {
+    window.clearTimeout(jumpTimer.current);
+    // Sans oubli automatique, un chiffre tapé par mégarde resterait affiché.
+    jumpTimer.current = window.setTimeout(() => setJumpInput(null), 2500);
+  };
+
+  const applyJump = (value: string) => {
+    const n = parseInt(value, 10);
+    window.clearTimeout(jumpTimer.current);
+    setJumpInput(null);
+    if (!Number.isFinite(n) || n < 1 || n > verses.length) return;
+    const idx = n - 1;
+    setActiveVerseIdx(idx);
+    if (!isBaseScreenProjected && activeSong?.id === projectedSong?.id) {
+      onProject(activeSong, idx);
+    }
+  };
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!verses || verses.length === 0) return;
       // On ignore la frappe si l'utilisateur écrit dans un champ.
       if (isTypingTarget(e.target)) return;
+
+      if (/^[0-9]$/.test(e.key) && !e.altKey && !e.ctrlKey) {
+        e.preventDefault();
+        setJumpInput((prev) => (prev || '') + e.key);
+        armJumpReset();
+        return;
+      }
+      if (jumpInput !== null) {
+        if (e.key === 'Enter') { e.preventDefault(); applyJump(jumpInput); return; }
+        if (e.key === 'Backspace') {
+          e.preventDefault();
+          setJumpInput((prev) => (prev && prev.length > 1 ? prev.slice(0, -1) : null));
+          armJumpReset();
+          return;
+        }
+        if (e.key === 'Escape') { e.preventDefault(); setJumpInput(null); return; }
+      }
 
       const isNext = NEXT_KEYS.includes(e.key);
       const isPrev = PREV_KEYS.includes(e.key);
@@ -92,7 +208,7 @@ export function RightProjection({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeVerseIdx, verses, activeSong, projectedSong, isBaseScreenProjected]);
+  }, [activeVerseIdx, verses, activeSong, projectedSong, isBaseScreenProjected, jumpInput]);
 
   const previewStreamRef = useRef<MediaStream | null>(null);
 
@@ -180,6 +296,10 @@ export function RightProjection({
       if (e.altKey && e.key === 'Enter') {
         e.preventDefault();
         onProject(activeSong, activeVerseIdx);
+        // On vient de projeter : la frappe suivante est une navigation, pas
+        // une recherche. Sans ceci le focus restait dans le champ de recherche
+        // et les flèches haut/bas ne faisaient plus rien.
+        focusSlideList();
       }
     };
     window.addEventListener('keydown', handleProjectKey);
@@ -187,21 +307,31 @@ export function RightProjection({
   }, [activeSong, activeVerseIdx]);
 
   return (
-    <div className="w-96 bg-[#202225] h-full flex flex-col border-l border-[#18191c]">
+    <div
+      className="bg-[#202225] h-full flex flex-col shrink-0 min-w-0"
+      style={{ width: width ?? 384 }}
+    >
       <div className="flex-1 overflow-y-auto flex flex-col">
         <div className="bg-[#5865f2] p-2 flex items-center gap-2 shadow-md">
            <Presentation size={16} className="text-white" />
            <span className="text-white font-bold text-sm truncate">{activeSong ? activeSong.title : "Aperçu"}</span>
         </div>
 
-        <div className="flex-1 p-2 space-y-1 bg-[#2f3136] overflow-y-auto">
+        {/* `tabIndex` : rend la liste focusable pour que `focusSlideList()`
+            puisse lui donner le clavier en sortant du champ de recherche.
+            L'anneau de focus confirme à l'opérateur que les flèches naviguent. */}
+        <div
+          id={SLIDE_LIST_ID}
+          tabIndex={-1}
+          className="flex-1 p-2 space-y-1 bg-[#2f3136] overflow-y-auto outline-none focus:ring-1 focus:ring-inset focus:ring-[#5865f2]/50"
+        >
           {!activeSong ? (
              <div className="flex flex-col items-center justify-center h-full text-gray-500 gap-2">
                 <AlertCircle size={32} />
                 <p className="text-xs text-center">Sélectionnez un contenu pour le préparer</p>
              </div>
           ) : (activeSong.type === 'image' || activeSong.type === 'video' || activeSong.type === 'document' || activeSong.type === 'audio' || activeSong.type === 'youtube' || activeSong.type === 'link') ? (
-             <div className="group flex flex-col items-center justify-center bg-[#36393f] hover:bg-[#4752c4] text-gray-300 hover:text-white rounded cursor-pointer transition border border-transparent hover:border-[#5865f2] overflow-hidden p-6 gap-3" onClick={() => onProject(activeSong, 0)}>
+             <div className="group flex flex-col items-center justify-center bg-[#36393f] hover:bg-[#4752c4] text-gray-300 hover:text-white rounded cursor-pointer transition border border-transparent hover:border-[#5865f2] overflow-hidden p-6 gap-3" onClick={() => { onProject(activeSong, 0); focusSlideList(); }}>
                 <div className="flex items-center gap-2">
                    {activeSong.type === 'audio' && <Headphones size={24} className="animate-bounce" />}
                    {activeSong.type === 'youtube' && <Youtube size={24} className="text-red-500" />}
@@ -220,7 +350,7 @@ export function RightProjection({
               const bgClass = isProjected ? "bg-red-600/20 border-red-500" : isPreviewed ? "bg-[#4752c4] border-[#5865f2]" : "bg-[#36393f] border-transparent";
               
               return (
-                <div key={idx} id={`verse-${idx}`} className={`group flex ${bgClass} hover:bg-[#4752c4] text-gray-300 hover:text-white rounded cursor-pointer transition border hover:border-[#5865f2] overflow-hidden`} onClick={() => { setActiveVerseIdx(idx); onProject(activeSong, idx); }}>
+                <div key={idx} id={`verse-${idx}`} className={`group flex ${bgClass} hover:bg-[#4752c4] text-gray-300 hover:text-white rounded cursor-pointer transition border hover:border-[#5865f2] overflow-hidden`} onClick={() => { setActiveVerseIdx(idx); onProject(activeSong, idx); focusSlideList(); }}>
                   <div className={`w-8 flex flex-col items-center justify-center text-[10px] font-bold border-r border-[#2f3136] ${isProjected ? 'bg-red-600 text-white' : 'bg-[#202225]'}`}>
                     {isProjected ? <span className="text-[7px] leading-tight">LIVE</span> : isRefrain ? <Star size={10} className="text-yellow-500" /> : label}
                   </div>
@@ -254,8 +384,11 @@ export function RightProjection({
             </button>
          )}
 
-         {/* Background — always visible (same as LiveView) */}
-         <div className="absolute inset-0 z-0">
+         {/* Background — always visible (same as LiveView).
+             Le traitement du fond (luminosité, flou, voile) est appliqué ici
+             AUSSI : c'est précisément le genre de réglage qu'on doit pouvoir
+             juger sans ouvrir la fenêtre de projection. */}
+         <div className="absolute inset-0 z-0 overflow-hidden">
             {bgImage?.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i) ? (
                spareDecoder ? (
                   <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-black">
@@ -263,13 +396,14 @@ export function RightProjection({
                      <span className="text-[6px] font-bold uppercase tracking-widest text-[#8891f2]">Fond vidéo en direct</span>
                   </div>
                ) : (
-                  <BackgroundVideo src={cleanUrl(bgImage)!} label="Fond aperçu" />
+                  <BackgroundVideo src={cleanUrl(bgImage)!} label="Fond aperçu" style={bgFilterStyle} />
                )
             ) : bgImage ? (
-               <img src={cleanUrl(bgImage)} className="w-full h-full object-cover" alt="Background" />
+               <img src={cleanUrl(bgImage)} className="w-full h-full object-cover" style={bgFilterStyle} alt="Background" />
             ) : (
                <div className="w-full h-full bg-black" />
             )}
+            {bgVeilStyle && <div className="absolute inset-0" style={bgVeilStyle} />}
          </div>
 
          {/* Camera Feed - Z-INDEX 5 (consistent with LiveView).
@@ -288,7 +422,17 @@ export function RightProjection({
 
          {/* Content overlay — only when projecting */}
          {!isBaseScreenProjected && projectedSong && (
-            <div className="absolute inset-0 flex items-center justify-center flex-col p-4 z-20">
+            /* La transition est rejouée ici aussi : l'opérateur doit pouvoir
+               juger l'effet sans ouvrir la fenêtre de projection. */
+            <SlideTransition
+               contentKey={`${projectedSong.id}:${projectedVerseIdx}:${projectedPdfPage || 1}`}
+               settings={transition}
+               keepPrevious={keepsPreviousLayer(
+                  ['image', 'video', 'document', 'audio', 'youtube', 'link'].includes(projectedSong.type)
+                     ? projectedSong.type : null
+               )}
+               className="absolute inset-0 flex items-center justify-center flex-col p-4 z-20"
+            >
                {projectedSong.type === 'markdown' ? (
                   /* Aperçu fidèle : même voile et mêmes réglages de texte que
                      la fenêtre de projection, pour que le fond reste visible. */
@@ -303,13 +447,14 @@ export function RightProjection({
                         }}
                      >
                         <MarkdownView
-                           content={getSlides(projectedSong)[projectedVerseIdx] || ''}
+                           content={getSlides(projectedSong, slideSplit)[projectedVerseIdx] || ''}
                            variant="preview"
                            style={{
-                              fontFamily: textSettings?.fontFamily,
+                              fontFamily: fontStack(textSettings?.fontFamily),
                               color: textSettings?.color || '#ffffff',
                               textAlign: textSettings?.align || 'left',
                               width: `${textSettings?.contentWidth || 100}%`,
+                              textShadow: textShadowCss(textSettings?.textShadow, textSettings?.color),
                            }}
                         />
                      </div>
@@ -364,31 +509,81 @@ export function RightProjection({
                      )}
                   </div>
                ) : (
+                  /* Aperçu du texte à l'ÉCHELLE de la projection : la taille est
+                     calculée en proportion de la vignette, comme les `vh` de la
+                     fenêtre de projection. Avec une taille fixe (`text-[8px]`),
+                     l'aperçu ne montrait jamais qu'un texte débordait de l'écran. */
                   <div
-                     className="flex flex-col w-full h-full"
+                     ref={overflowRef}
+                     className="flex flex-col w-full h-full overflow-hidden"
                      style={{
-                        fontFamily: textSettings?.fontFamily,
+                        fontFamily: fontStack(textSettings?.fontFamily),
                         justifyContent: textSettings?.valign === 'middle' ? 'center' : textSettings?.valign === 'bottom' ? 'flex-end' : 'flex-start',
                         alignItems: textSettings?.align === 'center' ? 'center' : textSettings?.align === 'left' ? 'flex-start' : 'flex-end'
                      }}
                   >
-                     {projectedLines.map((line: string, i: number) => (
-                        <p
-                           key={i}
-                           className="text-white font-bold text-[8px] w-full drop-shadow-md"
-                           style={{
-                              textAlign: textSettings?.align as any,
-                              fontWeight: textSettings?.isBold ? 'bold' : 'normal',
-                              fontStyle: textSettings?.isItalic ? 'italic' : 'normal',
-                              textDecoration: textSettings?.isUnderline ? 'underline' : 'none'
-                           }}
-                           dangerouslySetInnerHTML={{ __html: line.replace(/<\/?[^>]+(>|$)/g, "") }}
-                        />
-                     ))}
+                     <div
+                        className="flex flex-col"
+                        style={{
+                           width: `${textSettings?.contentWidth || 100}%`,
+                           alignItems: textSettings?.align === 'center' ? 'center' : textSettings?.align === 'left' ? 'flex-start' : 'flex-end',
+                        }}
+                     >
+                        {displayLines.map((line: string, i: number) => (
+                           <p
+                              key={i}
+                              className="w-full"
+                              style={{
+                                 color: textSettings?.color || '#ffffff',
+                                 textAlign: textSettings?.align as any,
+                                 fontWeight: textSettings?.isBold ? 'bold' : 'normal',
+                                 fontStyle: textSettings?.isItalic ? 'italic' : 'normal',
+                                 textDecoration: textSettings?.isUnderline ? 'underline' : 'none',
+                                 fontSize: `${((textSettings?.fontSize || 100) / 100) * 0.07 * previewHeight}px`,
+                                 lineHeight: textSettings?.lineHeight || 1.4,
+                                 textShadow: textShadowCss(textSettings?.textShadow, textSettings?.color),
+                              }}
+                              dangerouslySetInnerHTML={{ __html: line.replace(/<\/?[^>]+(>|$)/g, "") }}
+                           />
+                        ))}
+                        {/* Versions supplémentaires, à la même échelle que la
+                            projection : c'est ici qu'on juge si trois versions
+                            tiennent encore sur la diapo. */}
+                        {(parallels || []).map((p: any, i: number) => (
+                           <p
+                              key={`${p.version}-${i}`}
+                              className="mt-[0.4em] w-full border-t border-current/20 pt-[0.3em]"
+                              style={{
+                                 color: textSettings?.color || '#ffffff',
+                                 opacity: 0.86,
+                                 textAlign: textSettings?.align as any,
+                                 fontWeight: textSettings?.isBold ? 'bold' : 'normal',
+                                 fontSize: `${((textSettings?.fontSize || 100) / 100) * 0.07 * previewHeight * ((parallelStyle?.sizeFactor || 70) / 100)}px`,
+                                 lineHeight: textSettings?.lineHeight || 1.4,
+                                 textShadow: textShadowCss(textSettings?.textShadow, textSettings?.color),
+                              }}
+                           >
+                              {parallelStyle?.showBookName && (
+                                 <span style={{ opacity: 0.7 }}>{p.book} {p.chapter}:{p.verse} — </span>
+                              )}
+                              {p.text}
+                           </p>
+                        ))}
+                     </div>
                   </div>
                )}
-            </div>
+            </SlideTransition>
          )}
+
+         {/* Entête — même composant que la projection, à l'échelle de la vignette */}
+         <ProjectionHeader
+            text={headerText}
+            settings={headerConf}
+            clock={clock}
+            ticker={ticker}
+            boxHeight={previewHeight}
+            zIndex={30}
+         />
 
          {/* BASE screen: show only background label */}
          {isBaseScreenProjected && (
@@ -432,6 +627,37 @@ export function RightProjection({
             </div>
          )}
 
+         {/* Débordement : l'alerte vit DANS le moniteur, à l'endroit où l'on
+             regarde déjà, et propose la correction au lieu de seulement
+             constater le problème. */}
+         {overflow.overflowing && !isBaseScreenProjected && (
+            <div className="absolute left-2 top-5 z-[70] flex items-center gap-1.5 rounded border border-amber-500/50 bg-amber-950/90 px-1.5 py-1 shadow-lg">
+               <AlertTriangle size={11} className="shrink-0 text-amber-400" />
+               <span className="text-[8px] font-bold uppercase tracking-wide text-amber-200">
+                  Texte trop grand
+               </span>
+               {onShrinkText && (
+                  <button
+                     className="rounded bg-amber-500 px-1.5 py-0.5 text-[8px] font-black text-amber-950 transition hover:bg-amber-400"
+                     title={`Réduire la taille du texte à environ ${fittingFontSize(textSettings?.fontSize || 100, overflow.excess)} % (appliqué à la portée sélectionnée dans la barre d'outils)`}
+                     onClick={() => onShrinkText(fittingFontSize(textSettings?.fontSize || 100, overflow.excess))}
+                  >
+                     AJUSTER
+                  </button>
+               )}
+            </div>
+         )}
+
+         {/* Saisie du saut direct : visible le temps de taper, puis oubliée. */}
+         {jumpInput !== null && (
+            <div className="absolute left-1/2 top-1/2 z-[90] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-[#5865f2] bg-black/85 px-4 py-2 text-center shadow-2xl">
+               <div className="font-mono text-2xl font-black tabular-nums text-white">{jumpInput}</div>
+               <div className="text-[8px] uppercase tracking-widest text-gray-400">
+                  Entrée pour aller à cette diapo
+               </div>
+            </div>
+         )}
+
          {/* LIVE indicator */}
          {isLiveActive && <div className="absolute bottom-2 right-2 bg-red-600 text-white text-[8px] px-1 py-0.5 rounded font-bold animate-pulse z-40 shadow-xl border border-white/20">LIVE</div>}
 
@@ -463,6 +689,42 @@ export function RightProjection({
                >
                   <MonitorOff size={14} /> COUPER LA PROJECTION
                </button>
+            </div>
+         )}
+      </div>
+
+      {/* ==== PROCHAINE DIAPO ====
+          Affichable ou non : certains opérateurs connaissent leur recueil et
+          n'en veulent pas, d'autres ne projettent que deux fois par an. Le
+          réglage est retenu, et la bande disparaît complètement quand elle est
+          masquée — pas de place perdue. */}
+      <div className="shrink-0 border-t border-[#18191c] bg-[#1e1f22]">
+         <button
+            className="flex w-full items-center gap-1.5 px-2 py-1 text-left text-[9px] font-bold uppercase tracking-widest text-gray-500 transition hover:text-gray-300"
+            onClick={() => setShowNext((v: boolean) => !v)}
+            title={showNext ? "Masquer la prochaine diapo" : "Afficher la prochaine diapo"}
+         >
+            {showNext ? <ChevronDown size={11} /> : <ChevronUp size={11} />}
+            Prochaine diapo
+            {!showNext && nextSlideText && (
+               <span className="ml-1 truncate font-normal normal-case tracking-normal text-gray-600">
+                  · {nextSlideText.replace(/\s+/g, ' ').slice(0, 40)}
+               </span>
+            )}
+         </button>
+         {showNext && (
+            <div className="px-2 pb-2">
+               {nextSlideText ? (
+                  <div className="rounded border border-[#36393f] bg-[#2b2d31] p-2">
+                     <p className="line-clamp-3 text-[11px] leading-snug text-gray-300">
+                        {nextSlideText.replace(/<\/?[^>]+(>|$)/g, '')}
+                     </p>
+                  </div>
+               ) : (
+                  <div className="rounded border border-dashed border-[#36393f] p-2 text-center text-[10px] text-gray-600">
+                     {activeSong ? "Dernière diapo — la suivante ramène à l'accueil" : 'Aucun contenu sélectionné'}
+                  </div>
+               )}
             </div>
          )}
       </div>

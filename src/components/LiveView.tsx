@@ -1,4 +1,4 @@
-import { useEffect, useState, memo, useRef } from "react";
+import { useEffect, useState, memo, useMemo, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { FileText, ChevronLeft, ChevronRight } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
@@ -8,6 +8,17 @@ import { PdfViewer, type PdfViewerHandle } from "./PdfViewer";
 import { BackgroundVideo } from "./BackgroundVideo";
 import { ProjectedVideo } from "./ProjectedVideo";
 import { MarkdownView } from "./MarkdownView";
+import {
+  bgMediaStyle, veilStyle, withBgDefaults, textShadowCss,
+  DEFAULT_BG_FILTERS, type BgFilters,
+} from "../lib/bgStyle";
+import { fontStack } from "../lib/fonts";
+import { ProjectionHeader } from "./ProjectionHeader";
+import { DEFAULT_HEADER, withHeaderDefaults, type HeaderSettings } from "../lib/header";
+import { SlideTransition } from "./SlideTransition";
+import {
+  DEFAULT_TRANSITION, keepsPreviousLayer, withTransitionDefaults, type TransitionSettings,
+} from "../lib/transitions";
 
 const RenderClock = memo(({ clock, currentTime }: { clock: any, currentTime: Date }) => {
   if (!clock.enabled) return null;
@@ -194,8 +205,22 @@ const RenderTicker = memo(({ ticker }: { ticker: any }) => {
 export function LiveView() {
   const [lines, setLines] = useState<string[]>([]);
   const [reference, setReference] = useState<string>("");
-  const [isBible, setIsBible] = useState<boolean>(true);
+  // Versions bibliques supplémentaires, calculées par la fenêtre de contrôle.
+  const [parallels, setParallels] = useState<any[]>([]);
+  const [parallelStyle, setParallelStyle] = useState<{ sizeFactor: number; showBookName: boolean }>(
+    { sizeFactor: 70, showBookName: false }
+  );
+  /* Vrai pour un texte biblique : la première ligne porte alors le numéro du
+     verset, qui part dans l'entête au lieu d'être projetée. (Le placement de
+     l'entête, lui, ne dépend plus du type de contenu — voir lib/header.ts.) */
   const [bgImage, setBgImage] = useState<string>(() => localStorage.getItem('live_bg') || "/backgrounds/sunset.jpg");
+  // Traitement du fond (luminosité, flou, voile). Lu depuis localStorage à
+  // l'ouverture : la fenêtre doit s'afficher déjà correcte, avant le premier
+  // évènement du contrôleur.
+  const [bgFilters, setBgFilters] = useState<BgFilters>(() => {
+    try { return withBgDefaults(JSON.parse(localStorage.getItem('live_bg_filters') || 'null')); }
+    catch { return { ...DEFAULT_BG_FILTERS }; }
+  });
   const [mediaOverlay, setMediaOverlay] = useState<{ type: string, url: string } | null>(() => {
     const saved = localStorage.getItem('live_media');
     return saved ? JSON.parse(saved) : null;
@@ -214,11 +239,40 @@ export function LiveView() {
   // New features
   const [clock, setClock] = useState<any>({ enabled: false, type: 'digital', position: 'top-right', style: 'modern' });
   const [ticker, setTicker] = useState<any>({ enabled: false, message: '', position: 'bottom' });
+  const [transition, setTransition] = useState<TransitionSettings>(() => {
+    try { return withTransitionDefaults(JSON.parse(localStorage.getItem('live_transition') || 'null')); }
+    catch { return { ...DEFAULT_TRANSITION }; }
+  });
+  const [header, setHeader] = useState<HeaderSettings>(() => {
+    try { return withHeaderDefaults(JSON.parse(localStorage.getItem('live_header') || 'null')); }
+    catch { return { ...DEFAULT_HEADER }; }
+  });
   const [pdfSize, setPdfSize] = useState({ width: 100, height: 100 });
   const [pdfPage, setPdfPage] = useState(1);
   const [pdfNumPages, setPdfNumPages] = useState(0);
   const [showPdfControls, setShowPdfControls] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
+
+  // Styles du fond mémorisés.
+  // `BackgroundVideo` est un composant `memo` : lui passer un objet de style
+  // reconstruit à chaque rendu le faisait re-rendre à chaque seconde d'horloge
+  // ou à chaque changement de diapo, pour rien.
+  const bgFilterStyle = useMemo(() => bgMediaStyle(bgFilters), [bgFilters]);
+  const bgVideoStyle = useMemo(
+    () => ({ width: '100vw', height: '100vh', objectFit: 'cover' as const, ...bgFilterStyle }),
+    [bgFilterStyle]
+  );
+  const bgVeilStyle = useMemo(() => veilStyle(bgFilters), [bgFilters]);
+
+  // Identité de la diapo affichée : c'est ce qui déclenche une transition.
+  // Le FOND n'y figure pas — il vit derrière le contenu et ne doit surtout pas
+  // être réanimé (ni, pour une vidéo, redémarré) à chaque verset.
+  const slideKey = useMemo(
+    () => (mediaOverlay?.url
+      ? `media:${mediaOverlay.type}:${mediaOverlay.url}`
+      : `text:${reference}|${lines.join("\n")}`),
+    [mediaOverlay?.type, mediaOverlay?.url, reference, lines]
+  );
 
   const pdfViewerRef = useRef<PdfViewerHandle>(null);
   const lastEmittedPageRef = useRef(0);
@@ -325,7 +379,6 @@ export function LiveView() {
           const data = JSON.parse(savedLyrics);
           setLines(data.lines || []);
           setReference(data.reference || "");
-          setIsBible(data.isBible || false);
         }
         
         // Load initial camera state from storage since we won't get the event if it was sent before window opened
@@ -345,8 +398,12 @@ export function LiveView() {
 
     const unlistens = [
       listen<any>("update_live_content", (event) => {
-        const { lyrics, media } = event.payload;
+        const { lyrics, media, transition } = event.payload;
         console.log("Atomic Content Update:", event.payload);
+
+        // 0. Transition : posée avant le contenu, dans le même lot de mises à
+        // jour React, pour que la diapo entrante soit animée avec SON réglage.
+        if (transition) setTransition(withTransitionDefaults(transition));
 
         // 1. Update Media
         setMediaOverlay(media);
@@ -355,15 +412,17 @@ export function LiveView() {
         if (media) {
           setLines([]);
           setReference("");
-          setIsBible(false);
+          setParallels([]);
         } else {
           const payloadLines = lyrics.lines || [];
           const ref = lyrics.reference || "";
           const isBib = !!lyrics.isBible;
 
           setReference(ref);
-          setIsBible(isBib);
 
+          // Le numéro du verset n'est retiré du texte que s'il part dans
+          // l'entête (`ref` non vide). Entête masquée, il reste visible dans
+          // la diapo : l'assemblée doit pouvoir situer le passage.
           let finalLines = payloadLines;
           if (isBib && ref && finalLines.length > 1) {
             if (/^\d+$/.test(finalLines[0].trim())) {
@@ -371,9 +430,14 @@ export function LiveView() {
             }
           }
           setLines(finalLines);
+          setParallels(lyrics.parallels || []);
+          setParallelStyle(lyrics.parallelStyle || { sizeFactor: 70, showBookName: false });
         }
       }),
       listen<string>("update_live_bg", (event) => setBgImage(event.payload)),
+      listen<Partial<BgFilters>>("update_live_bg_filters", (event) =>
+        setBgFilters(withBgDefaults(event.payload))
+      ),
       listen<any>("update_live_style", (event) => {
         console.log("Received style:", event.payload);
         setTextSettings(event.payload);
@@ -394,6 +458,9 @@ export function LiveView() {
           return event.payload;
         });
       }),
+      listen<Partial<HeaderSettings>>("update_live_header", (event) =>
+        setHeader(withHeaderDefaults(event.payload))
+      ),
       listen<{width: number, height: number}>("update_pdf_size", (event) => setPdfSize(event.payload)),
       listen<number>("command_pdf_page", (event) => {
         // Operator asked to project a specific page → scroll the live view to it
@@ -534,19 +601,29 @@ export function LiveView() {
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-black flex items-center justify-center text-white select-none">
 
-      {/* Background Video or Image - Z-INDEX 0 */}
+      {/* Background Video or Image - Z-INDEX 0.
+          `overflow-hidden` est indispensable : un fond flouté est agrandi (voir
+          bgMediaStyle) et déborderait sinon du cadre de l'écran. */}
       {bgImage && cleanUrl(bgImage) && (
-        <div className="absolute inset-0 z-0 bg-black">
+        <div className="absolute inset-0 z-0 overflow-hidden bg-black">
           {bgImage.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i) ? (
             <BackgroundVideo
               src={cleanUrl(bgImage)!}
               label="Fond LiveView"
               className=""
-              style={{ width: '100vw', height: '100vh', objectFit: 'cover' }}
+              style={bgVideoStyle}
             />
           ) : (
-            <img src={cleanUrl(bgImage)} className="w-full h-full object-cover" alt="BG" />
+            <img
+              src={cleanUrl(bgImage)}
+              className="w-full h-full object-cover"
+              style={bgFilterStyle}
+              alt="BG"
+            />
           )}
+          {/* Voile uni : il se pose SUR le fond mais SOUS le contenu, pour
+              détacher le texte sans le ternir lui aussi. */}
+          {bgVeilStyle && <div className="absolute inset-0" style={bgVeilStyle} />}
         </div>
       )}
 
@@ -592,6 +669,12 @@ export function LiveView() {
       )}
 
       <div className={`absolute inset-0 w-full h-full transition-opacity duration-300 z-20 ${isContentHidden ? 'opacity-0' : 'opacity-100'}`}>
+       <SlideTransition
+         contentKey={slideKey}
+         settings={transition}
+         keepPrevious={keepsPreviousLayer(mediaOverlay?.type)}
+         className="absolute inset-0"
+       >
         {mediaOverlay && mediaOverlay.url && (
           /* Le fond noir opaque convient à une image, une vidéo ou un PDF, qui
              occupent tout l'écran. Une diapo Markdown, elle, est du CONTENU :
@@ -617,9 +700,9 @@ export function LiveView() {
                 <MarkdownView
                   content={mediaOverlay.url}
                   variant="projection"
-                  className="drop-shadow-[0_4px_6px_rgba(0,0,0,0.9)]"
                   style={{
-                    fontFamily: textSettings?.fontFamily,
+                    textShadow: textShadowCss(textSettings?.textShadow, textSettings?.color),
+                    fontFamily: fontStack(textSettings?.fontFamily),
                     color: textSettings?.color || '#ffffff',
                     textAlign: textSettings?.align || 'left',
                     width: `${textSettings?.contentWidth || 100}%`,
@@ -687,16 +770,14 @@ export function LiveView() {
           </div>
         )}
 
-        {reference && (
-          <div className={`absolute z-20 text-white font-bold drop-shadow-lg ${isBible ? 'top-8 right-12 text-4xl' : 'bottom-4 left-0 right-0 text-center text-xl text-white/60'}`}>
-            {reference}
-          </div>
-        )}
+        {/* Entête : position, taille, police et couleur viennent des réglages,
+            et elle s'écarte d'elle-même de l'horloge et du bandeau. */}
+        <ProjectionHeader text={reference} settings={header} clock={clock} ticker={ticker} />
 
         <div
           className="absolute inset-0 flex flex-col p-12 z-10 w-full h-full"
           style={{
-            fontFamily: textSettings?.fontFamily,
+            fontFamily: fontStack(textSettings?.fontFamily),
             justifyContent: textSettings?.valign === 'middle' ? 'center' : textSettings?.valign === 'bottom' ? 'flex-end' : 'flex-start',
             alignItems: textSettings?.align === 'center' ? 'center' : textSettings?.align === 'left' ? 'flex-start' : 'flex-end',
           }}
@@ -712,17 +793,46 @@ export function LiveView() {
             {lines.map((line, i) => (
               <p
                 key={i}
-                className={`text-white font-bold w-full drop-shadow-[0_8px_8px_rgba(0,0,0,1)] ${textSettings?.isItalic ? 'italic' : ''} ${textSettings?.isUnderline ? 'underline' : ''}`}
+                /* La couleur et l'ombre viennent des réglages : `text-white` et
+                   une ombre en dur ignoraient la couleur choisie, et noircir un
+                   texte sombre sur fond clair le rendait illisible. */
+                className={`w-full ${textSettings?.isItalic ? 'italic' : ''} ${textSettings?.isUnderline ? 'underline' : ''}`}
                 style={{
+                  color: textSettings?.color || '#ffffff',
                   fontWeight: textSettings?.isBold ? 'bold' : 'normal',
                   fontSize: `${(textSettings?.fontSize || 100) / 100 * 7}vh`,
-                  lineHeight: textSettings?.lineHeight || 1.4
+                  lineHeight: textSettings?.lineHeight || 1.4,
+                  textShadow: textShadowCss(textSettings?.textShadow, textSettings?.color),
                 }}
                 dangerouslySetInnerHTML={{ __html: line.replace(/<\/?[^>]+(>|$)/g, "") }}
               />
             ))}
+
+            {/* Versions supplémentaires : séparées par un filet discret, en
+                plus petit. Elles accompagnent le texte principal, elles ne le
+                concurrencent pas. */}
+            {parallels.map((p: any, i: number) => (
+              <p
+                key={`${p.version}-${i}`}
+                className="mt-[0.4em] w-full border-t border-current/20 pt-[0.3em]"
+                style={{
+                  color: textSettings?.color || '#ffffff',
+                  opacity: 0.86,
+                  fontWeight: textSettings?.isBold ? 'bold' : 'normal',
+                  fontSize: `${((textSettings?.fontSize || 100) / 100) * 7 * ((parallelStyle.sizeFactor || 70) / 100)}vh`,
+                  lineHeight: textSettings?.lineHeight || 1.4,
+                  textShadow: textShadowCss(textSettings?.textShadow, textSettings?.color),
+                }}
+              >
+                {parallelStyle.showBookName && (
+                  <span style={{ opacity: 0.7 }}>{p.book} {p.chapter}:{p.verse} — </span>
+                )}
+                {p.text}
+              </p>
+            ))}
           </div>
         </div>
+       </SlideTransition>
       </div>
     </div>
   );

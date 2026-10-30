@@ -1,13 +1,21 @@
 // Lecture automatique fiable des vidéos de FOND (background).
 //
 // Symptôme corrigé : sur certaines machines Linux (WebKitGTK), la vidéo de fond
-// restait figée avec un gros bouton "play" au milieu. Trois causes possibles :
+// restait figée avec un gros bouton "play" au milieu. Cinq causes possibles :
 //   1. WebKit exige un geste utilisateur -> play() est rejeté (on retente + on
 //      rejoue au premier clic/touche, et lib.rs désactive ce réglage).
 //   2. `canplay` n'est jamais émis (pipeline GStreamer lent à démarrer) alors
 //      que la vidéo est décodable -> on retente périodiquement.
 //   3. Codec absent (H.264 sans gstreamer1.0-libav) -> play() ne marchera
 //      jamais : on log l'erreur exacte au lieu de l'avaler silencieusement.
+//   4. Le serveur média local n'était pas encore prêt -> l'élément part en
+//      erreur et y reste. `play()` n'en sort pas : il faut RECHARGER.
+//   5. Le pipeline cale en cours de route -> l'élément se dit « en lecture »
+//      mais aucune image ne sort. Seul le suivi de `currentTime` le détecte.
+//
+// Les deux dernières sont traitées par la surveillance en bas de
+// `forceBackgroundPlayback` : c'est elle qui explique les démarrages ratés
+// « de temps en temps », sans cause apparente.
 
 const MEDIA_ERRORS: Record<number, string> = {
   1: "MEDIA_ERR_ABORTED (lecture interrompue)",
@@ -75,11 +83,72 @@ export function forceBackgroundPlayback(el: HTMLVideoElement, src: string, label
   window.addEventListener("pointerdown", onGesture, true);
   window.addEventListener("keydown", onGesture, true);
 
-  // Relance périodique tant que ça ne joue pas (le fond doit tourner en boucle,
-  // même si le décodeur met du temps à démarrer).
+  // --- Surveillance : relancer, et si besoin RECHARGER ---------------------
+  //
+  // Relancer ne suffit pas. `play()` ne répare pas deux situations pourtant
+  // courantes, et c'est ce qui faisait qu'un fond vidéo « ne démarrait pas,
+  // parfois » :
+  //
+  //   a) L'élément est en ERREUR. Au lancement, le serveur média local
+  //      (127.0.0.1:11223) n'est pas toujours prêt à la milliseconde où la
+  //      fenêtre de projection s'ouvre : la requête échoue, `error` est émis,
+  //      et l'élément reste définitivement cassé. `play()` sur un élément en
+  //      erreur ne fait rien — il faut relire la source.
+  //
+  //   b) L'élément se dit EN LECTURE mais rien n'avance. Le pipeline GStreamer
+  //      a calé : `paused` vaut false, donc l'ancienne surveillance considérait
+  //      que tout allait bien et ne retentait jamais. À l'écran, une image fixe.
+  //
+  // On suit donc la progression réelle de `currentTime`. Le rechargement est
+  // plafonné : si le codec manque (H.264 sans gstreamer1.0-libav), recharger en
+  // boucle ne ferait que consommer le processeur pendant le culte.
+  const MAX_RELOADS = 5;
+  const STALL_TICKS = 3; // ~3 s sans la moindre image avant de réagir
+  let lastTime = -1;
+  let stalledTicks = 0;
+  let reloads = 0;
+
+  const reload = (why: string) => {
+    if (reloads >= MAX_RELOADS) return;
+    reloads++;
+    console.warn(`[${label}] ${why} -> rechargement ${reloads}/${MAX_RELOADS}`,
+      el.error ? `| ${describeVideoError(el)}` : "");
+    try {
+      el.removeAttribute("src");
+      el.load();           // coupe le pipeline en cours (cf. releaseVideo)
+      el.setAttribute("src", src);
+      el.load();
+    } catch (e) {
+      console.warn(`[${label}] rechargement impossible:`, e);
+    }
+    attempt();
+  };
+
   const timer = window.setInterval(() => {
-    if (stopped) return;
-    if (el.paused || el.ended) attempt();
+    if (stopped || !el.isConnected) return;
+
+    if (el.error) {
+      reload("élément en erreur");
+      return;
+    }
+    if (el.paused || el.ended) {
+      attempt();
+      return;
+    }
+
+    // Se dit en lecture : vérifier que des images sortent vraiment.
+    if (el.currentTime === lastTime) {
+      if (++stalledTicks >= STALL_TICKS) {
+        stalledTicks = 0;
+        reload("lecture figée (aucune image depuis 3 s)");
+      }
+    } else {
+      // Ça tourne : on repart de zéro, y compris le compteur de
+      // rechargements, pour qu'un incident tardif reste rattrapable.
+      lastTime = el.currentTime;
+      stalledTicks = 0;
+      reloads = 0;
+    }
   }, 1000);
 
   attempt();

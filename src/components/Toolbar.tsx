@@ -1,35 +1,100 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight,
-  MonitorOff, Play, Image, Video, Plus, StopCircle,
-  Settings2, Trash2, EyeOff, Eye, Presentation,
-  AlignVerticalJustifyCenter, AlignVerticalJustifyStart, AlignVerticalJustifyEnd,
-  ChevronDown, Camera, Type, List, Clock, MessageSquare, RefreshCw, AlertCircle, Zap
+  AlignCenter, AlignLeft, AlignRight,
+  AlignVerticalJustifyCenter, AlignVerticalJustifyEnd, AlignVerticalJustifyStart,
+  AlertCircle, Bold, Camera, ChevronDown, Clock, Eye, EyeOff, Heading,
+  Image as ImageIcon, Italic, Languages, Megaphone, MessageSquare, MonitorSpeaker, MoveHorizontal, Play, Presentation,
+  Palette, RefreshCw, Scissors, Settings2, StopCircle, Sun, Trash2, Underline, Wand2,
+  UnfoldVertical, Video, Zap,
 } from 'lucide-react';
-import { cleanUrl } from '../lib/media';
+import { FontPicker } from './FontPicker';
+import { TEXT_SHADOWS } from '../lib/bgStyle';
+import {
+  ColorField, Divider, Group, IconBtn, MiniDivider, Select, Slider, TextBtn,
+} from './toolbar/ui';
+import { BgFiltersMenu, MediaLibraryMenu } from './toolbar/BackgroundMenus';
+import { AnnouncementsMenu, ClockMenu, HeaderMenu, ParallelMenu, SplitMenu, StageMenu, TickerMenu, TransitionMenu } from './toolbar/OverlayMenus';
+import { TRANSITIONS } from '../lib/transitions';
+import { ThemesMenu } from './toolbar/ThemesMenu';
 
-
-
-
+/**
+ * Barre d'outils.
+ *
+ * Elle est organisée en DEUX LIGNES, et la raison est fonctionnelle :
+ *
+ *   Ligne 1 — ce qui agit MAINTENANT sur l'écran de l'assemblée (direct,
+ *             écran noir, caméra, horloge…). Pendant un culte, c'est là qu'on
+ *             va, et ces boutons ne doivent jamais changer de place.
+ *   Ligne 2 — l'APPARENCE de la diapo (police, alignement, fond). On y passe
+ *             en préparation, rarement en direct.
+ *
+ * Avant, les dix groupes partageaient une seule ligne avec `flex-wrap` : selon
+ * la largeur de la fenêtre et le contenu sélectionné, le bouton LIVE pouvait
+ * se retrouver sur la deuxième ligne ou la quatrième. Chercher un bouton
+ * pendant une projection est exactement ce qu'il ne faut pas faire.
+ */
 export function Toolbar({
-  setBgImage, textSettings, setTextSettings, isLiveActive, handleLiveToggle,
+  setBgImage, bgImage, bgFilters, setBgFilters,
+  textSettings, setTextSettings, sampleText,
+  isLiveActive, handleLiveToggle,
   editingScope, setEditingScope, activeSong, activeVerseIdx, activeCategory,
   clearSpecificSettings, isContentHidden, setIsContentHidden, isBaseScreenProjected,
   setIsBaseScreenProjected, cameraList, selectedCamera, setSelectedCamera,
   isCameraActive, setIsCameraActive,
   clockSettings, setClockSettings,
   tickerSettings, setTickerSettings,
+  headerSettings, setHeaderSettings,
+  transition, setTransition,
+  themeContext, onApplyTheme,
+  parallel, setParallel, currentBibleDb,
+  slideSplit, setSlideSplit,
+  announcements, setAnnouncements,
+  stage, setStage, isStageActive, handleStageToggle, timerStart, setTimerStart,
+  liveStatus,
   refreshCameras, setOverlayColor,
-  cameraError
+  cameraError,
 }: any) {
-  const [activeMediaMenu, setActiveMediaMenu] = useState<'image' | 'video' | 'clock' | 'ticker' | null>(null);
-  const [showFontDropdown, setShowFontDropdown] = useState(false);
-  const [customBgs, setCustomBgs] = useState<string[]>([]); // Stores absolute paths
+  type Menu = 'image' | 'video' | 'bgfilters' | 'clock' | 'ticker' | 'header' | 'transition' | 'themes' | 'parallel' | 'split' | 'announcements' | 'stage' | 'fontsize' | null;
+  const [menu, setMenu] = useState<Menu>(null);
+  const [customBgs, setCustomBgs] = useState<string[]>([]); // chemins absolus
   const [optimizing, setOptimizing] = useState(false);
   const [optimizeMsg, setOptimizeMsg] = useState<string | null>(null);
 
-  // Analyse et compresse automatiquement les médias trop lourds (fonds vidéo,
-  // images) pour éviter les gels de lecture sur l'écran de présentation.
+  const toggleMenu = (m: Exclude<Menu, null>) => setMenu((cur) => (cur === m ? null : m));
+  const patchText = (patch: any) => setTextSettings({ ...textSettings, ...patch });
+
+  const fontSizes = [50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 180, 200, 250, 300];
+
+  const loadBackgrounds = async () => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      setCustomBgs(await invoke<string[]>('list_backgrounds'));
+    } catch (e) {
+      console.error('Failed to load local backgrounds', e);
+    }
+  };
+
+  useEffect(() => { loadBackgrounds(); }, []);
+
+  /**
+   * Fermeture de la liste des tailles au clic extérieur.
+   *
+   * Les panneaux passent par `Popover`, qui s'en charge. La liste des tailles,
+   * elle, est une simple `div` : elle restait ouverte par-dessus l'éditeur
+   * jusqu'à ce qu'on reclique exactement sur sa flèche.
+   */
+  const fontSizeRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (menu !== 'fontsize') return;
+    const onDown = (e: MouseEvent) => {
+      if (!fontSizeRef.current?.contains(e.target as Node)) setMenu(null);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [menu]);
+
+  // Analyse et compresse les médias trop lourds (fonds vidéo, images) pour
+  // éviter les gels de lecture sur l'écran de présentation.
   const handleOptimizeMedia = async () => {
     setOptimizing(true);
     setOptimizeMsg(null);
@@ -40,7 +105,7 @@ export function Toolbar({
         ? ` · ${report.compressed} optimisé(s), ${report.skipped} déjà léger(s), ${report.errors} erreur(s)`
         : '';
       setOptimizeMsg(`Analyse terminée${details}`);
-      loadBackgrounds(); // rafraîchit les vignettes après remplacement des fichiers
+      loadBackgrounds(); // les fichiers ont été remplacés : vignettes à rafraîchir
     } catch (e) {
       setOptimizeMsg('Erreur : ' + e);
     } finally {
@@ -49,523 +114,562 @@ export function Toolbar({
     }
   };
 
-  const fontSizes = [50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 180, 200, 250, 300];
-
-  const isVideoUrl = (url: string) => url.match(/\.(mp4|webm|ogg|mov|mkv|avi|m4v)(\?.*)?$/i);
-
-  const defaultBgs: { name: string, url: string }[] = [
-    // { name: 'Easy Worship', url: '/backgrounds/easy_worship.mp4' }
-    // { name: 'Sunset', url: '/backgrounds/sunset.jpg' },
-    // { name: 'Book', url: '/backgrounds/books.jpg' },
-  ];
-
-  const handleBgSelect = async (url: string) => {
-    setBgImage(url);
-    setActiveMediaMenu(null);
-  };
-
-  const handleAddCustomMedia = async (mediaType: 'image' | 'video') => {
+  const handleImportBackground = async (kind: 'image' | 'video') => {
     try {
       const { open } = await import('@tauri-apps/plugin-dialog');
       const { invoke } = await import('@tauri-apps/api/core');
-
       const file = await open({
         multiple: false,
-        filters: mediaType === 'image' ? [{
-          name: 'Images',
-          extensions: ['png', 'jpeg', 'jpg', 'webp', 'gif']
-        }] : [{
-          name: 'Videos',
-          extensions: ['mp4', 'webm', 'ogg', 'mov', 'mkv', 'avi', 'm4v']
-        }]
+        filters: kind === 'image'
+          ? [{ name: 'Images', extensions: ['png', 'jpeg', 'jpg', 'webp', 'gif'] }]
+          : [{ name: 'Videos', extensions: ['mp4', 'webm', 'ogg', 'mov', 'mkv', 'avi', 'm4v'] }],
       });
-
       if (file && typeof file === 'string') {
-        // Copy to internal data folder
         const internalPath: string = await invoke('import_background', { sourcePath: file });
         loadBackgrounds();
-        handleBgSelect(internalPath);
+        setBgImage(internalPath);
+        setMenu(null);
       }
-    } catch (e) { console.error(e) }
+    } catch (e) { console.error(e); }
   };
 
-  const handleDeleteCustomMedia = async (e: React.MouseEvent, path: string) => {
+  const handleDeleteBackground = async (e: React.MouseEvent, path: string) => {
     e.stopPropagation();
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       const { confirm } = await import('@tauri-apps/plugin-dialog');
-
-      const ok = await confirm("Voulez-vous vraiment supprimer cet élément de la bibliothèque ?", { title: "Suppression", kind: 'warning' });
+      const ok = await confirm('Voulez-vous vraiment supprimer cet élément de la bibliothèque ?', {
+        title: 'Suppression', kind: 'warning',
+      });
       if (ok) {
         await invoke('delete_background', { filePath: path });
         loadBackgrounds();
       }
-    } catch (e) { console.error(e) }
+    } catch (e) { console.error(e); }
   };
 
-  const loadBackgrounds = async () => {
-    try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      const files: string[] = await invoke('list_backgrounds');
-      setCustomBgs(files);
-    } catch (e) {
-      console.error("Failed to load local backgrounds", e);
-    }
+  const emitOverlay = async (color: 'black' | 'white' | null) => {
+    setOverlayColor?.(color);
+    (await import('@tauri-apps/api/event')).emit('update_live_overlay', color);
   };
 
+  const scopeIsSpecific = editingScope !== 'category';
 
-
-  useEffect(() => {
-    loadBackgrounds();
-  }, []);
+  /** Portée en cours, en toutes lettres — rappelée dans les panneaux. */
+  const scopeLabel =
+    editingScope === 'base' ? "l'écran d'accueil"
+      : editingScope === 'book' ? `le livre « ${activeSong?.book} »`
+        : editingScope === 'song' ? (activeSong?.type === 'bible' ? 'ce chapitre' : 'ce chant')
+          : editingScope === 'verse' ? (activeSong?.type === 'bible' ? 'ce verset' : 'cette diapo')
+            : `tous les ${activeCategory === 'bible' ? 'textes bibliques' : 'chants'}`;
 
   return (
-    <div className="min-h-[5rem] py-2 bg-[#2b2d31] border-b border-[#1e1f22] flex flex-wrap items-center px-4 gap-6 shrink-0 shadow-sm z-10 w-full text-gray-200">
+    <div className="shrink-0 border-b border-[#1e1f22] bg-[#2b2d31] text-gray-200 shadow-sm">
 
-      {/* Group: Scope Selection */}
-      <div className="flex flex-col gap-1 min-w-max">
-        <span className="text-[10px] font-bold text-[#5865f2] uppercase tracking-wider flex items-center gap-1"><Settings2 size={10} /> Appliquer à</span>
-        <div className="flex items-center gap-1 bg-[#1e1f22] p-1 rounded-md">
-          <select
-            className="bg-[#1e1f22] text-[10px] text-gray-200 font-bold border border-[#36393f] outline-none rounded px-2 py-1 cursor-pointer appearance-none pr-6 max-w-[140px] truncate hover:border-[#5865f2] transition-colors"
-            style={{ backgroundImage: `url('data:image/svg+xml;utf8,<svg fill="currentColor" height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg"><path d="M7 10l5 5 5-5z" fill="%239CA3AF"/></svg>')`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 2px center', backgroundSize: '16px' }}
-            value={editingScope || 'category'}
-            onChange={(e) => setEditingScope(e.target.value)}
+      {/* ====================== LIGNE 1 — PROJECTION ====================== */}
+      <div className="flex flex-wrap items-end gap-x-3 gap-y-2 px-3 py-1.5">
+
+        <Group label="Direct">
+          <TextBtn
+            title={isLiveActive ? "Fermer la fenêtre de projection (Alt+L)" : "Ouvrir la fenêtre de projection (Alt+L)"}
+            onClick={handleLiveToggle}
+            tone={isLiveActive ? 'live' : 'accent'}
+            icon={isLiveActive ? <StopCircle size={13} /> : <Play size={13} />}
           >
-            <option value="base" className="bg-[#2b2d31]">Écran de Base / Accueil</option>
-            <option value="category" className="bg-[#2b2d31]">Par défaut ({activeCategory === 'bible' ? 'Bible' : 'Recueils'})</option>
-            {activeSong?.book && <option value="book" className="bg-[#2b2d31]">Livre ({activeSong.book})</option>}
-            {activeSong?.id && <option value="song" className="bg-[#2b2d31]">{activeSong?.type === 'bible' ? 'Chapitre (Bible)' : 'Chant courant'}</option>}
-            {activeSong?.id && activeVerseIdx !== -1 && <option value="verse" className="bg-[#2b2d31]">{activeSong?.type === 'bible' ? 'Verset courant' : 'Diapo courante'}</option>}
-          </select>
-          {editingScope !== 'category' && (
-            <button onClick={clearSpecificSettings} className="p-1 px-1.5 hover:bg-red-500/20 text-red-400 hover:text-red-500 rounded transition" title="Effacer"><Trash2 size={14} /></button>
+            {isLiveActive ? 'ARRÊTER' : 'LANCER'}
+          </TextBtn>
+          <MiniDivider />
+          <TextBtn
+            title="Masquer le contenu en gardant le fond (Alt+H)"
+            onClick={async () => {
+              setIsContentHidden(!isContentHidden);
+              (await import('@tauri-apps/api/event')).emit('update_live_hide_content', !isContentHidden);
+            }}
+            tone="warn"
+            active={isContentHidden}
+            icon={isContentHidden ? <Eye size={13} /> : <EyeOff size={13} />}
+          >
+            {isContentHidden ? 'AFFICHER' : 'MASQUER'}
+          </TextBtn>
+          <MiniDivider />
+          <div className="relative">
+            <IconBtn
+              title="Écran retour pour l'estrade (fenêtre séparée, fermée par défaut)"
+              active={isStageActive}
+              onClick={() => toggleMenu('stage')}
+            >
+              <MonitorSpeaker size={14} />
+            </IconBtn>
+            <StageMenu
+              open={menu === 'stage'}
+              onClose={() => setMenu(null)}
+              stage={stage}
+              setStage={setStage}
+              isStageActive={!!isStageActive}
+              onToggle={() => handleStageToggle?.()}
+              timerStart={timerStart ?? null}
+              setTimerStart={setTimerStart}
+            />
+          </div>
+        </Group>
+
+        <Divider />
+
+        <Group label="Écran de l'assemblée">
+          <IconBtn
+            title="Revenir à l'écran d'accueil (Alt+B)"
+            active={isBaseScreenProjected}
+            onClick={async () => {
+              setIsBaseScreenProjected(true);
+              const { emit } = await import('@tauri-apps/api/event');
+              await emit('update_live_lyrics', { lines: [], reference: '' });
+              await emit('update_live_media', null);
+            }}
+          >
+            <Presentation size={14} />
+          </IconBtn>
+          <MiniDivider />
+          {/* Les trois voiles gardent leur apparence de pastille : c'est la
+              couleur elle-même qui dit ce que fait le bouton. */}
+          <button
+            type="button"
+            title="Écran noir (Alt+N ou « . »)"
+            onClick={() => emitOverlay('black')}
+            className="h-[26px] w-[26px] shrink-0 rounded border border-gray-600 bg-black transition hover:border-white"
+          />
+          <button
+            type="button"
+            title="Écran blanc (Alt+W)"
+            onClick={() => emitOverlay('white')}
+            className="h-[26px] w-[26px] shrink-0 rounded border border-gray-600 bg-white transition hover:border-[#5865f2]"
+          />
+          <TextBtn title="Retirer le voile et revenir à la projection (Alt+R ou Échap)" onClick={() => emitOverlay(null)}>
+            Reprendre
+          </TextBtn>
+          <MiniDivider />
+          {/* Horloge et bandeau vivent ICI : ils s'ajoutent à ce que voit
+              l'assemblée, exactement comme l'écran noir ou l'accueil. Seuls
+              dans leur propre section, ils laissaient une large zone étiquetée
+              pour deux petits boutons. */}
+          <div className="relative">
+            <IconBtn title="Horloge (Alt+C)" active={!!clockSettings.enabled} onClick={() => toggleMenu('clock')}>
+              <Clock size={14} />
+            </IconBtn>
+            <ClockMenu open={menu === 'clock'} onClose={() => setMenu(null)} clock={clockSettings} setClock={setClockSettings} />
+          </div>
+          <div className="relative">
+            <IconBtn title="Message défilant (Alt+M)" active={!!tickerSettings.enabled} onClick={() => toggleMenu('ticker')}>
+              <MessageSquare size={14} />
+            </IconBtn>
+            <TickerMenu open={menu === 'ticker'} onClose={() => setMenu(null)} ticker={tickerSettings} setTicker={setTickerSettings} />
+          </div>
+          <div className="relative">
+            <IconBtn
+              title="Annonces défilantes sur l'écran d'accueil"
+              active={!!announcements?.enabled}
+              onClick={() => toggleMenu('announcements')}
+            >
+              <Megaphone size={14} />
+            </IconBtn>
+            <AnnouncementsMenu
+              open={menu === 'announcements'}
+              onClose={() => setMenu(null)}
+              announcements={announcements}
+              setAnnouncements={setAnnouncements}
+            />
+          </div>
+        </Group>
+
+        <Divider />
+
+        <Group label="Caméra">
+          <TextBtn
+            title="Diffuser la caméra sur l'écran de projection"
+            active={isCameraActive}
+            onClick={async () => {
+              const next = !isCameraActive;
+              if (next && refreshCameras) await refreshCameras(true);
+              setIsCameraActive(next);
+              (await import('@tauri-apps/api/event')).emit('toggle_live_camera', next);
+            }}
+            icon={<Camera size={13} className={isCameraActive ? 'animate-pulse' : ''} />}
+          >
+            {isCameraActive ? 'EN DIRECT' : 'Caméra'}
+          </TextBtn>
+
+          {isCameraActive && (
+            <>
+              <MiniDivider />
+              {cameraError ? (
+                <span className="flex max-w-[170px] items-center gap-1 text-[10px] font-bold text-red-400" title={cameraError}>
+                  <AlertCircle size={11} className="shrink-0" />
+                  <span className="truncate">{cameraError}</span>
+                </span>
+              ) : cameraList.length === 0 ? (
+                <span className="text-[10px] font-bold text-red-400">Aucune source</span>
+              ) : (
+                <Select
+                  value={selectedCamera}
+                  title="Source vidéo"
+                  className="max-w-[150px]"
+                  onChange={async (v) => {
+                    setSelectedCamera(v);
+                    (await import('@tauri-apps/api/event')).emit('set_camera_id', v);
+                  }}
+                >
+                  {cameraList.map((c: any) => (
+                    <option key={c.deviceId} value={c.deviceId}>
+                      {c.label || `Caméra ${c.deviceId.slice(0, 4)}…`}
+                    </option>
+                  ))}
+                </Select>
+              )}
+              <IconBtn title="Rechercher à nouveau les caméras" onClick={async () => refreshCameras?.(true)}>
+                <RefreshCw size={12} />
+              </IconBtn>
+            </>
           )}
+        </Group>
+
+        <div className="ml-auto flex items-end gap-2">
+          {/* L'espace à droite restait vide. Il porte maintenant l'information
+              qu'on cherche le plus souvent du regard pendant un culte : ce qui
+              est réellement affiché à l'assemblée en ce moment. */}
+          <div className="flex h-[26px] items-center gap-2 rounded-md bg-[#1e1f22] px-2.5">
+            <span
+              className={`h-1.5 w-1.5 shrink-0 rounded-full ${isLiveActive ? 'animate-pulse bg-red-500' : 'bg-gray-600'}`}
+              title={isLiveActive ? 'Fenêtre de projection ouverte' : 'Projection fermée'}
+            />
+            <span className="shrink-0 text-[9px] font-bold uppercase tracking-wider text-gray-500">
+              À l'écran
+            </span>
+            <span className="max-w-[240px] truncate text-[11px] font-bold text-gray-200">
+              {isBaseScreenProjected ? "Écran d'accueil" : (liveStatus?.title || '—')}
+            </span>
+            {!isBaseScreenProjected && (liveStatus?.slides || 0) > 1 && (
+              <span className="shrink-0 font-mono text-[10px] tabular-nums text-gray-500">
+                {(liveStatus.slide ?? 0) + 1}/{liveStatus.slides}
+              </span>
+            )}
+          </div>
+
+          <div className="relative">
+            <TextBtn
+              title="Analyser et compresser les médias trop lourds, pour éviter les saccades en projection"
+              onClick={handleOptimizeMedia}
+              disabled={optimizing}
+              icon={<Zap size={13} className={optimizing ? 'animate-pulse text-[#5865f2]' : ''} />}
+            >
+              {optimizing ? 'Analyse…' : 'Optimiser'}
+            </TextBtn>
+            {optimizeMsg && (
+              <div className="absolute right-0 top-full z-[150] mt-2 w-72 whitespace-pre-wrap rounded-lg border border-[#1e1f22] bg-[#2b2d31] p-2.5 text-[11px] text-gray-300 shadow-2xl">
+                {optimizeMsg}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
-      <div className="w-px h-10 bg-[#1e1f22]"></div>
+      {/* ====================== LIGNE 2 — APPARENCE ====================== */}
+      <div className="flex flex-wrap items-end gap-x-3 gap-y-2 border-t border-[#1e1f22] bg-[#292b2f] px-3 py-1.5">
 
-      {/* Group: Text Style */}
-      <div className="flex flex-col gap-1">
-        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Style</span>
-        <div className="flex items-center gap-1 bg-[#1e1f22] p-1 rounded-md">
-          <select
-            className="bg-[#1e1f22] text-xs text-gray-200 border border-[#36393f] outline-none rounded px-2 py-1 cursor-pointer appearance-none pr-6 hover:border-[#5865f2] transition-colors"
-            style={{ backgroundImage: `url('data:image/svg+xml;utf8,<svg fill="currentColor" height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg"><path d="M7 10l5 5 5-5z" fill="%239CA3AF"/></svg>')`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 2px center', backgroundSize: '16px' }}
-            value={textSettings.fontFamily}
-            onChange={(e) => setTextSettings({ ...textSettings, fontFamily: e.target.value })}
+        <Group label="Ces réglages s'appliquent à">
+          <Select
+            value={editingScope || 'category'}
+            onChange={setEditingScope}
+            className="max-w-[168px]"
+            title="Une diapo hérite de son chant, qui hérite du livre, qui hérite de la catégorie. Le réglage le plus précis gagne."
           >
-            <option className="bg-[#2b2d31]" value="Inter">Inter</option>
-            <option className="bg-[#2b2d31]" value="Montserrat">Montserrat</option>
-            <option className="bg-[#2b2d31]" value="Poppins">Poppins</option>
-            <option className="bg-[#2b2d31]" value="Roboto Condensed">Roboto Condensed</option>
-            <option className="bg-[#2b2d31]" value="Oswald">Oswald</option>
-            <option className="bg-[#2b2d31]" value="Lora">Lora</option>
-            <option className="bg-[#2b2d31]" value="Playfair Display">Playfair Display</option>
-            <option className="bg-[#2b2d31]" value="Times New Roman">Times New Roman</option>
-            <option className="bg-[#2b2d31]" value="Arial">Arial</option>
-          </select>
+            <option value="base">L'écran d'accueil</option>
+            <option value="category">
+              Tout : {activeCategory === 'bible' ? 'textes bibliques' : 'chants'}
+            </option>
+            {activeSong?.book && <option value="book">Le livre « {activeSong.book} »</option>}
+            {activeSong?.id && (
+              <option value="song">{activeSong?.type === 'bible' ? 'Ce chapitre' : 'Ce chant'}</option>
+            )}
+            {activeSong?.id && activeVerseIdx !== -1 && (
+              <option value="verse">{activeSong?.type === 'bible' ? 'Ce verset' : 'Cette diapo'}</option>
+            )}
+          </Select>
+          {scopeIsSpecific && (
+            <IconBtn danger title="Effacer ce réglage particulier et revenir à l'héritage" onClick={clearSpecificSettings}>
+              <Trash2 size={13} />
+            </IconBtn>
+          )}
+          {!scopeIsSpecific && <Settings2 size={13} className="mx-1 text-gray-600" />}
+        </Group>
 
-          <div className="relative flex items-stretch">
+        <Divider />
+
+        <Group label="Texte">
+          <div className="w-[118px]">
+            <FontPicker
+              value={textSettings.fontFamily}
+              sample={sampleText}
+              onChange={(name) => patchText({ fontFamily: name })}
+            />
+          </div>
+
+          {/* Taille : saisie libre ET liste, parce qu'on veut parfois « 115 »
+              exactement, et parfois juste « plus grand ». */}
+          <div ref={fontSizeRef} className="relative flex items-stretch">
             <input
               type="text"
-              className="bg-[#2b2d31] text-xs text-gray-200 border border-[#36393f] outline-none rounded-l px-2 py-1 w-10 text-center"
-              value={textSettings.fontSize || ''}
-              onFocus={() => setShowFontDropdown(true)}
-              onBlur={() => setTimeout(() => setShowFontDropdown(false), 200)}
+              inputMode="numeric"
+              title="Taille du texte, en pourcentage de la taille de référence"
+              className="h-[26px] w-10 rounded-l border border-[#36393f] bg-[#2b2d31] text-center text-[11px] text-gray-100 outline-none focus:border-[#5865f2]"
+              value={textSettings.fontSize ?? ''}
               onChange={(e) => {
                 const val = parseInt(e.target.value);
-                setTextSettings({ ...textSettings, fontSize: isNaN(val) ? 100 : val });
+                patchText({ fontSize: isNaN(val) ? 100 : val });
               }}
             />
-            <button className="bg-[#2b2d31] border border-l-0 border-[#36393f] rounded-r px-1 text-gray-400" onClick={() => setShowFontDropdown(!showFontDropdown)}>
+            <button
+              type="button"
+              title="Tailles courantes"
+              className="flex h-[26px] items-center rounded-r border border-l-0 border-[#36393f] bg-[#2b2d31] px-1 text-gray-400 hover:text-white"
+              onClick={() => toggleMenu('fontsize')}
+            >
               <ChevronDown size={10} />
             </button>
-            {showFontDropdown && (
-              <div className="absolute top-full left-0 mt-1 w-16 bg-[#2b2d31] border border-[#36393f] rounded shadow-xl max-h-40 overflow-y-auto z-50">
-                {fontSizes.map(size => (
-                  <div key={size} className="px-2 py-1 text-xs hover:bg-[#5865f2] cursor-pointer" onMouseDown={() => setTextSettings({ ...textSettings, fontSize: size })}>{size}</div>
+            {menu === 'fontsize' && (
+              <div className="absolute left-0 top-full z-[150] mt-1 max-h-44 w-14 overflow-y-auto custom-scrollbar rounded border border-[#36393f] bg-[#2b2d31] shadow-xl">
+                {fontSizes.map((size) => (
+                  <button
+                    key={size}
+                    type="button"
+                    className={`block w-full px-2 py-1 text-left text-[11px] transition hover:bg-[#5865f2] ${textSettings.fontSize === size ? 'text-[#8891f2]' : 'text-gray-300'}`}
+                    onClick={() => { patchText({ fontSize: size }); setMenu(null); }}
+                  >
+                    {size}
+                  </button>
                 ))}
               </div>
             )}
           </div>
 
-          <div className="w-px h-4 bg-gray-600 mx-1"></div>
-          <button className={`p-1.5 rounded transition ${textSettings.isBold ? 'bg-[#5865f2] text-white shadow-sm' : 'hover:bg-[#3f4147] text-gray-300'}`} onClick={() => setTextSettings({ ...textSettings, isBold: !textSettings.isBold })}><Bold size={14} /></button>
-          <button className={`p-1.5 rounded transition ${textSettings.isItalic ? 'bg-[#5865f2] text-white shadow-sm' : 'hover:bg-[#3f4147] text-gray-300'}`} onClick={() => setTextSettings({ ...textSettings, isItalic: !textSettings.isItalic })}><Italic size={14} /></button>
-          <button className={`p-1.5 rounded transition ${textSettings.isUnderline ? 'bg-[#5865f2] text-white shadow-sm' : 'hover:bg-[#3f4147] text-gray-300'}`} onClick={() => setTextSettings({ ...textSettings, isUnderline: !textSettings.isUnderline })}><Underline size={14} /></button>
-        </div>
-      </div>
+          <MiniDivider />
+          <IconBtn title="Gras" active={!!textSettings.isBold} onClick={() => patchText({ isBold: !textSettings.isBold })}>
+            <Bold size={13} />
+          </IconBtn>
+          <IconBtn title="Italique" active={!!textSettings.isItalic} onClick={() => patchText({ isItalic: !textSettings.isItalic })}>
+            <Italic size={13} />
+          </IconBtn>
+          <IconBtn title="Souligné" active={!!textSettings.isUnderline} onClick={() => patchText({ isUnderline: !textSettings.isUnderline })}>
+            <Underline size={13} />
+          </IconBtn>
+          <MiniDivider />
+          <ColorField
+            value={textSettings.color || '#ffffff'}
+            onChange={(v) => patchText({ color: v })}
+            title="Couleur du texte projeté"
+          />
+          <Select
+            value={textSettings.textShadow || 'soft'}
+            onChange={(v) => patchText({ textShadow: v })}
+            className="max-w-[104px]"
+            title="Lisibilité du texte sur le fond : ombre, contour ou halo"
+          >
+            {TEXT_SHADOWS.map((s) => (
+              <option key={s.value} value={s.value}>{s.label}</option>
+            ))}
+          </Select>
+        </Group>
 
-      <div className="w-px h-10 bg-[#1e1f22]"></div>
-      {/* Group: Alignment & Dimensions */}
-      <div className="flex flex-col gap-1 min-w-[300px]">
-        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Mise en forme</span>
-        <div className="flex items-center gap-2 bg-[#1e1f22] p-1.5 rounded-md h-[42px]">
-          <div className="flex bg-[#2b2d31] rounded border border-[#36393f] overflow-hidden shrink-0">
-            <button className={`p-1.5 transition ${textSettings.align === 'left' ? 'bg-[#3f4147]' : 'hover:bg-[#3f4147]'}`} onClick={() => setTextSettings({ ...textSettings, align: 'left' })}><AlignLeft size={14} /></button>
-            <button className={`p-1.5 transition ${textSettings.align === 'center' ? 'bg-[#3f4147]' : 'hover:bg-[#3f4147]'}`} onClick={() => setTextSettings({ ...textSettings, align: 'center' })}><AlignCenter size={14} /></button>
-            <button className={`p-1.5 transition ${textSettings.align === 'right' ? 'bg-[#3f4147]' : 'hover:bg-[#3f4147]'}`} onClick={() => setTextSettings({ ...textSettings, align: 'right' })}><AlignRight size={14} /></button>
-          </div>
-          <div className="w-px h-6 bg-[#2b2d31]"></div>
-          <div className="flex bg-[#2b2d31] rounded border border-[#36393f] overflow-hidden shrink-0">
-            <button className={`p-1.5 transition ${textSettings.valign === 'top' ? 'bg-[#3f4147]' : 'hover:bg-[#3f4147]'}`} onClick={() => setTextSettings({ ...textSettings, valign: 'top' })} title="Haut"><AlignVerticalJustifyStart size={14} /></button>
-            <button className={`p-1.5 transition ${textSettings.valign === 'middle' ? 'bg-[#3f4147]' : 'hover:bg-[#3f4147]'}`} onClick={() => setTextSettings({ ...textSettings, valign: 'middle' })} title="Milieu"><AlignVerticalJustifyCenter size={14} /></button>
-            <button className={`p-1.5 transition ${textSettings.valign === 'bottom' ? 'bg-[#3f4147]' : 'hover:bg-[#3f4147]'}`} onClick={() => setTextSettings({ ...textSettings, valign: 'bottom' })} title="Bas"><AlignVerticalJustifyEnd size={14} /></button>
-          </div>
-          <div className="w-px h-6 bg-[#2b2d31]"></div>
-          <div className="flex flex-col gap-1 flex-1 px-1">
-            <div className="flex items-center gap-2" title="Interligne">
-              <List size={10} className="text-gray-500 shrink-0" />
-              <input type="range" min="0.8" max="3" step="0.1" value={textSettings.lineHeight || 1.4} onChange={(e) => setTextSettings({ ...textSettings, lineHeight: parseFloat(e.target.value) })} className="flex-1 h-1 accent-[#5865f2]" />
-            </div>
-            <div className="flex items-center gap-2" title="Largeur">
-              <Type size={10} className="text-gray-500 shrink-0" />
-              <input type="range" min="20" max="100" step="1" value={textSettings.contentWidth || 100} onChange={(e) => setTextSettings({ ...textSettings, contentWidth: parseInt(e.target.value) })} className="flex-1 h-1 accent-[#5865f2]" />
-            </div>
-          </div>
-          <span className="text-[9px] text-gray-500 font-mono w-6 text-right shrink-0">{textSettings.contentWidth || 100}%</span>
-        </div>
-      </div>
+        <Divider />
 
-      <div className="w-px h-10 bg-[#1e1f22]"></div>
-
-      {/* Group: Background */}
-      <div className="flex flex-col gap-1">
-        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Arrière-plan</span>
-        <div className="flex items-center gap-1 bg-[#1e1f22] p-1 rounded-md">
+        {/* Un seul groupe pour les quatre panneaux qui habillent la diapo.
+            Séparés, chacun portait une large étiquette pour un unique bouton —
+            d'où l'impression de sections vides. Ils ont la même nature : ils
+            suivent la portée sélectionnée, comme la police et le fond. */}
+        <Group label="Fond et habillage de la diapo">
           <div className="relative">
-            <button className="flex items-center gap-1.5 px-3 py-1.5 hover:bg-[#3f4147] rounded text-gray-300 transition text-xs font-semibold" onClick={() => setActiveMediaMenu(activeMediaMenu === 'image' ? null : 'image')}>
-              <Image size={14} /> Images
-            </button>
-            {activeMediaMenu === 'image' && (
-              <div className="absolute top-full left-0 mt-2 bg-[#2b2d31] border border-[#1e1f22] shadow-2xl rounded p-2 z-50 w-64 overflow-y-auto max-h-64">
-                <div className="flex justify-between items-center mb-2 px-1 text-[10px] font-bold text-gray-400 uppercase">Bibliothèque <button onClick={() => handleAddCustomMedia('image')} className="text-[#5865f2] hover:text-[#4752c4]"><Plus size={14} /></button></div>
-                <div className="grid grid-cols-2 gap-2">
-                  {defaultBgs.filter(bg => !isVideoUrl(bg.url)).map(bg => <div key={bg.url} onClick={() => handleBgSelect(bg.url)} className="aspect-video bg-black overflow-hidden rounded border border-transparent hover:border-[#5865f2] transition cursor-pointer"><img src={bg.url} className="w-full h-full object-cover" /></div>)}
-                  {customBgs.filter(path => !isVideoUrl(path)).map((path, i) => (
-                    <div key={i} onClick={() => handleBgSelect(path)} className="aspect-video bg-black overflow-hidden rounded border border-transparent hover:border-[#5865f2] transition cursor-pointer relative group">
-                      <img src={cleanUrl(path)} className="w-full h-full object-cover" />
-                      <button onClick={(e) => handleDeleteCustomMedia(e, path)} className="absolute top-1 right-1 p-1 bg-red-600/80 text-white rounded opacity-0 group-hover:opacity-100 transition hover:bg-red-600">
-                        <Trash2 size={10} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+            <TextBtn title="Choisir une image de fond" onClick={() => toggleMenu('image')} icon={<ImageIcon size={13} />}>
+              Images
+            </TextBtn>
+            <MediaLibraryMenu
+              kind="image"
+              open={menu === 'image'}
+              onClose={() => setMenu(null)}
+              items={customBgs}
+              current={bgImage}
+              onPick={(p) => { setBgImage(p); setMenu(null); }}
+              onImport={() => handleImportBackground('image')}
+              onDelete={handleDeleteBackground}
+            />
           </div>
           <div className="relative">
-            <button className="flex items-center gap-1.5 px-3 py-1.5 hover:bg-[#3f4147] rounded text-gray-300 transition text-xs font-semibold" onClick={() => setActiveMediaMenu(activeMediaMenu === 'video' ? null : 'video')}>
-              <Video size={14} /> Vidéos
-            </button>
-            {activeMediaMenu === 'video' && (
-              <div className="absolute top-full left-0 mt-2 bg-[#2b2d31] border border-[#1e1f22] shadow-2xl rounded p-2 z-50 w-64 overflow-y-auto max-h-64">
-                <div className="flex justify-between items-center mb-2 px-1 text-[10px] font-bold text-gray-400 uppercase">Fonds Vidéo <button onClick={() => handleAddCustomMedia('video')} className="text-[#5865f2] hover:text-[#4752c4]"><Plus size={14} /></button></div>
-                <div className="grid grid-cols-2 gap-2">
-                  {defaultBgs.filter(bg => isVideoUrl(bg.url)).map(bg => (
-                    <div key={bg.url} onClick={() => handleBgSelect(bg.url)} className="aspect-video bg-black overflow-hidden rounded border border-transparent hover:border-[#5865f2] transition cursor-pointer relative group">
-                      <video src={bg.url} className="w-full h-full object-cover" muted />
-                      <div className="absolute inset-0 flex items-center justify-center text-white/40"><Play size={20} /></div>
-                    </div>
-                  ))}
-                  {customBgs.filter(path => isVideoUrl(path)).map((path, i) => (
-                    <div key={i} onClick={() => handleBgSelect(path)} className="aspect-video bg-black overflow-hidden rounded border border-transparent hover:border-[#5865f2] transition cursor-pointer relative group">
-                      <video src={cleanUrl(path)} className="w-full h-full object-cover" muted />
-                      <div className="absolute inset-0 flex items-center justify-center text-white/40"><Play size={20} /></div>
-                      <button onClick={(e) => handleDeleteCustomMedia(e, path)} className="absolute top-1 right-1 p-1 bg-red-600/80 text-white rounded opacity-0 group-hover:opacity-100 transition hover:bg-red-600">
-                        <Trash2 size={10} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+            <TextBtn title="Choisir une vidéo de fond" onClick={() => toggleMenu('video')} icon={<Video size={13} />}>
+              Vidéos
+            </TextBtn>
+            <MediaLibraryMenu
+              kind="video"
+              open={menu === 'video'}
+              onClose={() => setMenu(null)}
+              items={customBgs}
+              current={bgImage}
+              onPick={(p) => { setBgImage(p); setMenu(null); }}
+              onImport={() => handleImportBackground('video')}
+              onDelete={handleDeleteBackground}
+            />
           </div>
+          <MiniDivider />
           <div className="relative">
-            <button
-              className={`flex items-center gap-1.5 px-3 py-1.5 hover:bg-[#3f4147] rounded text-gray-300 transition text-xs font-semibold ${optimizing ? 'text-[#5865f2]' : ''}`}
-              onClick={handleOptimizeMedia}
-              disabled={optimizing}
-              title="Analyser et compresser automatiquement les médias trop lourds (fonds vidéo, images) pour des performances fluides"
+            <TextBtn
+              title="Assombrir, éclaircir, flouter ou voiler le fond pour que le texte ressorte"
+              onClick={() => toggleMenu('bgfilters')}
+              icon={<Sun size={13} />}
             >
-              <Zap size={14} className={optimizing ? 'animate-pulse' : ''} />
-              {optimizing ? 'Optimisation...' : 'Optimiser'}
-            </button>
-            {optimizeMsg && (
-              <div className="absolute top-full left-0 mt-2 bg-[#2b2d31] border border-[#1e1f22] shadow-2xl rounded p-2 z-50 w-80 text-[10px] text-gray-300 whitespace-pre-wrap">
-                {optimizeMsg}
-              </div>
-            )}
+              Réglages
+            </TextBtn>
+            <BgFiltersMenu
+              open={menu === 'bgfilters'}
+              onClose={() => setMenu(null)}
+              filters={bgFilters}
+              setFilters={setBgFilters}
+              bgImage={bgImage}
+            />
           </div>
-          <div className="flex items-center gap-1 bg-[#2b2d31] rounded-lg border border-[#36393f] p-1 ml-1 hover:border-[#5865f2] transition-all group/cam shadow-inner">
-            <button
-              className={`flex items-center gap-2 px-4 py-1.5 rounded-md transition-all text-xs font-bold ${isCameraActive ? 'bg-orange-500 text-white shadow-[0_0_15px_rgba(249,115,22,0.4)]' : 'hover:bg-[#3f4147] text-gray-400 group-hover/cam:text-gray-200'}`}
-              onClick={async () => {
-                const next = !isCameraActive;
-                console.log("Toggling camera. Target state:", next);
-                
-                if (next) {
-                  // Force label unlock on first activate
-                  if (refreshCameras) await refreshCameras(true);
-                }
-
-                setIsCameraActive(next);
-                const { emit } = await import('@tauri-apps/api/event');
-                emit('toggle_live_camera', next);
-              }}
+                  <MiniDivider />
+          <div className="relative">
+            <TextBtn
+              title="La référence affichée par-dessus la diapo — réglable par portée"
+              active={!!headerSettings?.enabled}
+              onClick={() => toggleMenu('header')}
+              icon={<Heading size={13} />}
             >
-              <Camera size={14} className={isCameraActive ? 'animate-pulse' : ''} /> 
-              <span>Caméra</span>
-            </button>
-            {isCameraActive && cameraList.length > 0 && (
-              <div className="relative flex items-center h-full">
-                <div className="w-px h-6 bg-[#36393f] mx-1"></div>
-                <select
-                  className="bg-[#1e1f22] text-[10px] text-[#5865f2] font-black border border-[#36393f] outline-none py-1 px-2 rounded-md cursor-pointer max-w-[120px] hover:border-[#5865f2] transition-all appearance-none pr-6 shadow-sm"
-                  style={{ backgroundImage: `url('data:image/svg+xml;utf8,<svg fill="currentColor" height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg"><path d="M7 10l5 5 5-5z" fill="%235865f2"/></svg>')`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 2px center', backgroundSize: '16px' }}
-                  value={selectedCamera}
-                  onChange={async (e) => {
-                    setSelectedCamera(e.target.value);
-                    const { emit } = await import('@tauri-apps/api/event');
-                    emit('set_camera_id', e.target.value);
-                  }}
+              Entête
+            </TextBtn>
+            <HeaderMenu
+              open={menu === 'header'}
+              onClose={() => setMenu(null)}
+              header={headerSettings}
+              setHeader={setHeaderSettings}
+              scopeLabel={scopeLabel}
+            />
+          </div>
+          <div className="relative">
+            <TextBtn
+              title="Effet joué au changement de diapo"
+              active={transition?.type && transition.type !== 'none'}
+              onClick={() => toggleMenu('transition')}
+              icon={<Wand2 size={13} />}
+            >
+              {TRANSITIONS.find((t) => t.value === (transition?.type || 'fade'))?.label || 'Fondu'}
+            </TextBtn>
+            <TransitionMenu
+              open={menu === 'transition'}
+              onClose={() => setMenu(null)}
+              transition={transition}
+              setTransition={setTransition}
+              scopeLabel={scopeLabel}
+            />
+          </div>
+
+          {activeCategory === 'bible' && (
+            /* Uniquement en vue Bible : ce réglage n'a aucun sens sur un chant,
+               et une barre d'outils doit montrer ce qui sert, maintenant. */
+            <>
+              <MiniDivider />
+              <div className="relative">
+                <TextBtn
+                  title="Projeter le verset dans plusieurs versions à la fois"
+                  active={(parallel?.versions?.length || 0) > 0}
+                  onClick={() => toggleMenu('parallel')}
+                  icon={<Languages size={13} />}
                 >
-                  {cameraList.map((c: any) => <option key={c.deviceId} value={c.deviceId} className="bg-[#2b2d31] text-white">
-                    {c.label || `Caméra #${c.deviceId.slice(0,4)}...`}
-                  </option>)}
-                </select>
-                <button
-                  className="ml-1 p-1 rounded hover:bg-[#3f4147] text-gray-400 hover:text-[#5865f2] transition"
-                  title="Rafraîchir les sources caméra"
-                  onClick={async () => { if (refreshCameras) await refreshCameras(true); }}
-                >
-                  <RefreshCw size={10} />
-                </button>
-              </div>
-            )}
-            {isCameraActive && cameraList.length === 0 && !cameraError && (
-               <div className="flex items-center gap-1 px-2">
-                 <span className="text-[10px] text-red-400 font-bold animate-pulse">Aucune source</span>
-                 <button
-                   className="p-0.5 rounded hover:bg-[#3f4147] text-gray-400 hover:text-[#5865f2] transition"
-                   title="Rafraîchir / Chercher DroidCam"
-                   onClick={async () => { if (refreshCameras) await refreshCameras(true); }}
-                 >
-                   <RefreshCw size={10} />
-                 </button>
-               </div>
-            )}
-            {isCameraActive && cameraError && (
-               <div className="flex items-center gap-1 px-2 max-w-[150px]">
-                 <AlertCircle size={10} className="text-red-400 shrink-0" />
-                 <span className="text-[9px] text-red-400 font-bold truncate" title={cameraError}>{cameraError}</span>
-                 <button
-                   className="p-0.5 rounded hover:bg-[#3f4147] text-gray-400 hover:text-[#5865f2] transition shrink-0"
-                   title="Réessayer"
-                   onClick={async () => { if (refreshCameras) await refreshCameras(true); }}
-                 >
-                   <RefreshCw size={10} />
-                 </button>
-               </div>
-            )}
-          </div>
-
-          <div className="w-px h-6 bg-[#2b2d31] mx-0.5"></div>
-
-          <button className="w-6 h-6 rounded bg-black border border-gray-600 hover:border-white transition shrink-0" title="Écran Noir (Alt+N)" onClick={async () => {
-            setOverlayColor?.('black');
-            (await import('@tauri-apps/api/event')).emit('update_live_overlay', 'black');
-          }}></button>
-          <button className="w-6 h-6 rounded bg-white border border-gray-600 hover:border-black transition shrink-0" title="Écran Blanc (Alt+W)" onClick={async () => {
-            setOverlayColor?.('white');
-            (await import('@tauri-apps/api/event')).emit('update_live_overlay', 'white');
-          }}></button>
-          <button className="w-6 h-6 rounded bg-gray-500/20 border border-gray-500 hover:bg-gray-500/40 transition flex items-center justify-center shrink-0" title="Réveil (Alt+R)" onClick={async () => {
-            setOverlayColor?.(null);
-            (await import('@tauri-apps/api/event')).emit('update_live_overlay', null);
-          }}><MonitorOff size={12} /></button>
-          <button className={`w-6 h-6 rounded border transition flex items-center justify-center shrink-0 ${isBaseScreenProjected ? 'bg-[#5865f2] text-white border-white' : 'bg-[#18191c] text-gray-400 border-gray-600 hover:border-[#5865f2]'}`} title="Accueil" onClick={async () => {
-            setIsBaseScreenProjected(true);
-            const { emit } = await import('@tauri-apps/api/event');
-            await emit('update_live_lyrics', { lines: [], reference: "" });
-            await emit('update_live_media', null);
-          }}><Presentation size={12} /></button>
-        </div>
-      </div>
-
-      <div className="w-px h-10 bg-[#1e1f22]"></div>
-
-      {/* Group: Extra Features */}
-      <div className="flex flex-col gap-1">
-        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Projection +</span>
-        <div className="flex items-center gap-1 bg-[#1e1f22] p-1 rounded-md">
-          <div className="relative">
-            <button
-              className={`p-1.5 rounded transition ${clockSettings.enabled ? 'bg-[#5865f2] text-white' : 'hover:bg-[#3f4147] text-gray-400'}`}
-              onClick={() => setActiveMediaMenu(activeMediaMenu === 'clock' ? null : 'clock')}
-            >
-              <Clock size={16} />
-            </button>
-            {activeMediaMenu === 'clock' && (
-              <div className="absolute top-full left-0 mt-2 bg-[#2b2d31] border border-[#1e1f22] shadow-2xl rounded p-3 z-50 w-64 space-y-3">
-                <div className="flex justify-between items-center text-[10px] font-bold text-[#5865f2] uppercase">Options Horloge</div>
-                <div className="flex items-center justify-between">
-                  <span className="text-xs">Activé</span>
-                  <input type="checkbox" checked={clockSettings.enabled} onChange={(e) => setClockSettings({ ...clockSettings, enabled: e.target.checked })} />
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <button className={`text-[10px] py-1 rounded border ${clockSettings.type === 'digital' ? 'bg-[#5865f2] border-white' : 'border-[#36393f]'}`} onClick={() => setClockSettings({ ...clockSettings, type: 'digital', style: 'modern' })}>Digital</button>
-                  <button className={`text-[10px] py-1 rounded border ${clockSettings.type === 'analog' ? 'bg-[#5865f2] border-white' : 'border-[#36393f]'}`} onClick={() => setClockSettings({ ...clockSettings, type: 'analog', style: 'minimal' })}>Analogue</button>
-                </div>
-                <div className="space-y-1">
-                  <span className="text-[10px] text-gray-400">Style</span>
-                  <select
-                    className="w-full bg-[#1e1f22] text-[10px] text-gray-200 border border-[#36393f] rounded p-1 appearance-none"
-                    style={{ backgroundImage: `url('data:image/svg+xml;utf8,<svg fill="currentColor" height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg"><path d="M7 10l5 5 5-5z" fill="%239CA3AF"/></svg>')`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 2px center', backgroundSize: '10px' }}
-                    value={clockSettings.style}
-                    onChange={(e) => setClockSettings({ ...clockSettings, style: e.target.value })}
-                  >
-                    {clockSettings.type === 'digital' ? (
-                      <>
-                        <option value="modern" className="bg-[#2b2d31]">Moderne</option>
-                        <option value="classic" className="bg-[#2b2d31]">Classique (Serif)</option>
-                        <option value="neon" className="bg-[#2b2d31]">Néon</option>
-                      </>
-                    ) : (
-                      <>
-                        <option value="minimal" className="bg-[#2b2d31]">Minimaliste</option>
-                        <option value="numbers" className="bg-[#2b2d31]">Avec Chiffres</option>
-                        <option value="sport" className="bg-[#2b2d31]">Sport / Bold</option>
-                      </>
-                    )}
-                  </select>
-                </div>
-                <div className="space-y-1">
-                  <div className="flex justify-between items-center">
-                    <span className="text-[10px] text-gray-400">Taille</span>
-                    <span className="text-[10px] text-[#5865f2] font-bold">{clockSettings.size}px</span>
-                  </div>
-                  <input type="range" min="20" max="300" value={clockSettings.size} onChange={(e) => setClockSettings({ ...clockSettings, size: parseInt(e.target.value) })} className="w-full h-1 accent-[#5865f2]" />
-                </div>
-                <div className="space-y-1">
-                  <span className="text-[10px] text-gray-400">Position</span>
-                  <select
-                    className="w-full bg-[#1e1f22] text-[10px] text-gray-200 border border-[#36393f] rounded p-1.5 outline-none appearance-none cursor-pointer"
-                    style={{ backgroundImage: `url('data:image/svg+xml;utf8,<svg fill="currentColor" height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg"><path d="M7 10l5 5 5-5z" fill="%239CA3AF"/></svg>')`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 4px center', backgroundSize: '12px' }}
-                    value={clockSettings.position}
-                    onChange={(e) => setClockSettings({ ...clockSettings, position: e.target.value })}
-                  >
-                    <option value="top-right" className="bg-[#2b2d31]">Haut Droite</option>
-                    <option value="top-left" className="bg-[#2b2d31]">Haut Gauche</option>
-                    <option value="bottom-right" className="bg-[#2b2d31]">Bas Droite</option>
-                    <option value="bottom-left" className="bg-[#2b2d31]">Bas Gauche</option>
-                    <option value="center" className="bg-[#2b2d31]">Centre</option>
-                  </select>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] text-gray-400">Couleur</span>
-                  <input type="color" value={clockSettings.color} onChange={(e) => setClockSettings({ ...clockSettings, color: e.target.value })} className="w-8 h-4 bg-transparent border-none cursor-pointer" />
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="relative">
-            <button
-              className={`p-1.5 rounded transition ${tickerSettings.enabled ? 'bg-[#5865f2] text-white' : 'hover:bg-[#3f4147] text-gray-400'}`}
-              onClick={() => setActiveMediaMenu(activeMediaMenu === 'ticker' ? null : 'ticker')}
-            >
-              <MessageSquare size={16} />
-            </button>
-            {activeMediaMenu === 'ticker' && (
-              <div className="absolute top-full left-0 mt-2 bg-[#2b2d31] border border-[#1e1f22] shadow-2xl rounded p-3 z-50 w-72 space-y-3">
-                <div className="flex justify-between items-center text-[10px] font-bold text-[#5865f2] uppercase">Message Défilant</div>
-                <div className="flex items-center justify-between">
-                  <span className="text-xs">Activé</span>
-                  <input type="checkbox" checked={tickerSettings.enabled} onChange={(e) => setTickerSettings({ ...tickerSettings, enabled: e.target.checked })} />
-                </div>
-                <textarea
-                  className="w-full bg-[#1e1f22] text-xs border border-[#36393f] rounded p-2 outline-none h-16 resize-none"
-                  placeholder="Votre message ici..."
-                  value={tickerSettings.message}
-                  onChange={(e) => setTickerSettings({ ...tickerSettings, message: e.target.value })}
+                  {(parallel?.versions?.length || 0) > 0
+                    ? `${parallel.versions.length + 1} versions`
+                    : 'Une version'}
+                </TextBtn>
+                <ParallelMenu
+                  open={menu === 'parallel'}
+                  onClose={() => setMenu(null)}
+                  parallel={parallel}
+                  setParallel={setParallel}
+                  currentVersion={currentBibleDb || activeSong?.version}
+                  scopeLabel={scopeLabel}
                 />
-                <div className="grid grid-cols-1 gap-3">
-                  <div className="flex flex-col gap-1">
-                    <span className="text-[10px] text-gray-400 uppercase font-black">Opacité Fond</span>
-                    <input type="range" min="0" max="1" step="0.1" value={tickerSettings.bgOpacity} onChange={(e) => setTickerSettings({ ...tickerSettings, bgOpacity: parseFloat(e.target.value) })} className="h-1 accent-[#5865f2]" />
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="flex flex-col gap-1">
-                    <span className="text-[10px] text-gray-400">Police</span>
-                    <select
-                      className="w-full bg-[#1e1f22] text-[10px] text-gray-200 border border-[#36393f] rounded p-1 appearance-none"
-                      style={{ backgroundImage: `url('data:image/svg+xml;utf8,<svg fill="currentColor" height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg"><path d="M7 10l5 5 5-5z" fill="%239CA3AF"/></svg>')`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 2px center', backgroundSize: '10px' }}
-                      value={tickerSettings.fontFamily}
-                      onChange={(e) => setTickerSettings({ ...tickerSettings, fontFamily: e.target.value })}
-                    >
-                      <option value="Inter" className="bg-[#2b2d31]">Inter</option>
-                      <option value="Montserrat" className="bg-[#2b2d31]">Montserrat</option>
-                      <option value="Oswald" className="bg-[#2b2d31]">Oswald</option>
-                    </select>
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <span className="text-[10px] text-gray-400">Taille</span>
-                    <input type="number" className="w-full bg-[#1e1f22] text-[10px] border border-[#36393f] rounded p-1" value={tickerSettings.fontSize} onChange={(e) => setTickerSettings({ ...tickerSettings, fontSize: parseInt(e.target.value) })} />
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-gray-400">Texte</span>
-                    <input type="color" value={tickerSettings.color} onChange={(e) => setTickerSettings({ ...tickerSettings, color: e.target.value })} className="w-6 h-4 bg-transparent border-none cursor-pointer" />
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-gray-400">Fond</span>
-                    <input type="color" value={tickerSettings.bgColor} onChange={(e) => setTickerSettings({ ...tickerSettings, bgColor: e.target.value })} className="w-6 h-4 bg-transparent border-none cursor-pointer" />
-                  </div>
-                </div>
-                <select
-                  className="w-full bg-[#1e1f22] text-[10px] text-gray-200 border border-[#36393f] rounded p-1.5 outline-none appearance-none"
-                  style={{ backgroundImage: `url('data:image/svg+xml;utf8,<svg fill="currentColor" height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg"><path d="M7 10l5 5 5-5z" fill="%239CA3AF"/></svg>')`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 4px center', backgroundSize: '12px' }}
-                  value={tickerSettings.position}
-                  onChange={(e) => setTickerSettings({ ...tickerSettings, position: e.target.value })}
-                >
-                  <option value="bottom" className="bg-[#2b2d31]">Bandeau en Bas</option>
-                  <option value="top" className="bg-[#2b2d31]">Bandeau en Haut</option>
-                </select>
               </div>
-            )}
+            </>
+          )}
+
+          <MiniDivider />
+          <div className="relative">
+            <TextBtn
+              title="Enregistrer l'apparence complète sous un nom, ou en rappeler une"
+              onClick={() => toggleMenu('themes')}
+              icon={<Palette size={13} />}
+            >
+              Thèmes
+            </TextBtn>
+            <ThemesMenu
+              open={menu === 'themes'}
+              onClose={() => setMenu(null)}
+              current={themeContext || {}}
+              onApply={(v) => { onApplyTheme?.(v); setMenu(null); }}
+              scopeLabel={scopeLabel}
+            />
           </div>
-        </div>
-      </div>
+        </Group>
 
-      {/* Projection Controls */}
-      <div className="ml-auto flex items-center gap-1 bg-[#1e1f22] p-1 rounded-md border border-[#36393f]">
-        <button
-          id="hide-toggle-btn"
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded transition text-[10px] font-bold ${isContentHidden ? 'bg-orange-500/20 border border-orange-500/50 text-orange-400' : 'hover:bg-[#3f4147] text-gray-400 hover:text-white'}`}
-          onClick={async () => {
-            setIsContentHidden(!isContentHidden);
-            (await import('@tauri-apps/api/event')).emit('update_live_hide_content', !isContentHidden);
-          }}
-        >
-          {isContentHidden ? <Eye size={14} /> : <EyeOff size={14} />}
-          {isContentHidden ? "AFFICHER" : "CACHER"}
-        </button>
+        <Divider />
 
-        <div className="w-px h-6 bg-[#2b2d31] mx-0.5"></div>
-
-        <button
-          id="live-toggle-btn"
-          className={`flex items-center gap-2 px-4 py-1.5 rounded transition text-[10px] font-black tracking-widest ${isLiveActive ? 'bg-red-600 text-white animate-pulse' : 'bg-[#5865f2]/20 border border-[#5865f2]/50 text-[#5865f2] hover:bg-[#5865f2] hover:text-white'}`}
-          onClick={handleLiveToggle}
-        >
-          {isLiveActive ? <StopCircle size={14} /> : <Play size={14} />}
-          {isLiveActive ? "OFF" : "LIVE"}
-        </button>
+        {/* Placé en DERNIER et extensible : sur un écran large il termine la
+            ligne, sur un écran étroit il passe seul à la ligne suivante et ses
+            curseurs y gagnent alors toute la largeur. Dans les deux cas la
+            bande paraît voulue, et les curseurs restent attrapables — c'était
+            le reproche principal de l'ancienne disposition. */}
+        <Group label="Mise en page" grow className="min-w-[320px]">
+          <div className="flex shrink-0 overflow-hidden rounded border border-[#36393f] bg-[#2b2d31]">
+            <IconBtn title="Aligné à gauche" active={textSettings.align === 'left'} onClick={() => patchText({ align: 'left' })}><AlignLeft size={13} /></IconBtn>
+            <IconBtn title="Centré" active={textSettings.align === 'center'} onClick={() => patchText({ align: 'center' })}><AlignCenter size={13} /></IconBtn>
+            <IconBtn title="Aligné à droite" active={textSettings.align === 'right'} onClick={() => patchText({ align: 'right' })}><AlignRight size={13} /></IconBtn>
+          </div>
+          <div className="flex shrink-0 overflow-hidden rounded border border-[#36393f] bg-[#2b2d31]">
+            <IconBtn title="En haut de l'écran" active={textSettings.valign === 'top'} onClick={() => patchText({ valign: 'top' })}><AlignVerticalJustifyStart size={13} /></IconBtn>
+            <IconBtn title="Au milieu" active={textSettings.valign === 'middle'} onClick={() => patchText({ valign: 'middle' })}><AlignVerticalJustifyCenter size={13} /></IconBtn>
+            <IconBtn title="En bas" active={textSettings.valign === 'bottom'} onClick={() => patchText({ valign: 'bottom' })}><AlignVerticalJustifyEnd size={13} /></IconBtn>
+          </div>
+          <MiniDivider />
+          {/* Les deux curseurs étaient empilés dans la hauteur d'un bouton :
+              leur piste faisait une soixantaine de pixels, impossible à viser
+              à la souris. Côte à côte, chacun garde une piste utilisable. */}
+          <Slider
+            icon={<UnfoldVertical size={12} className="shrink-0 text-gray-500" />}
+            value={textSettings.lineHeight || 1.4}
+            min={0.8} max={3} step={0.1}
+            onChange={(v) => patchText({ lineHeight: v })}
+            format={(v) => v.toFixed(1)}
+            title="Interligne : espace entre les lignes"
+          />
+          <Slider
+            icon={<MoveHorizontal size={12} className="shrink-0 text-gray-500" />}
+            value={textSettings.contentWidth || 100}
+            min={20} max={100}
+            onChange={(v) => patchText({ contentWidth: v })}
+            format={(v) => `${v}%`}
+            title="Largeur du bloc de texte : la réduire force des retours à la ligne plus tôt"
+          />
+          <MiniDivider />
+          <div className="relative">
+            <IconBtn
+              title="Découper automatiquement les diapos trop longues"
+              active={!!slideSplit?.enabled}
+              onClick={() => toggleMenu('split')}
+            >
+              <Scissors size={13} />
+            </IconBtn>
+            <SplitMenu
+              open={menu === 'split'}
+              onClose={() => setMenu(null)}
+              split={slideSplit}
+              setSplit={setSlideSplit}
+            />
+          </div>
+        </Group>
       </div>
     </div>
   );
