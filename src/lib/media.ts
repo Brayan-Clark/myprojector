@@ -10,7 +10,23 @@
 // cause of images "sometimes" not loading. We now derive the relative path from
 // the well-known sub-folders so it no longer depends on appDataPath being ready.
 
-const MEDIA_SERVER = "http://127.0.0.1:11223/fs/";
+/**
+ * Adresse du serveur média.
+ *
+ * ⚠ Le port n'est plus figé. Il l'était, et `warp` PANIQUE si le port est déjà
+ * pris : le serveur mourait en silence quand une instance précédente tournait
+ * encore, et plus aucun média local ne s'affichait — fond vidéo noir, image
+ * importée absente. Le backend choisit maintenant un port libre et le publie
+ * ici (voir `media_server_port`).
+ *
+ * La valeur est lue à chaque appel : la fenêtre de projection est ouverte
+ * après que la fenêtre de contrôle l'a enregistrée, et les deux partagent le
+ * même `localStorage`.
+ */
+function mediaServer(): string {
+  const port = localStorage.getItem("mediaPort") || "11223";
+  return `http://127.0.0.1:${port}/fs/`;
+}
 
 // Folders that live directly under the app-data root and are exposed by warp.
 const KNOWN_DIRS = ["/backgrounds/", "/media/", "/data/"];
@@ -47,5 +63,5 @@ export function cleanUrl(url?: string | null): string | undefined {
   // Encode each segment individually so spaces / accents / "#" / "?" in file
   // names are escaped while the path separators are preserved.
   const encoded = stripped.split("/").map(encodeURIComponent).join("/");
-  return MEDIA_SERVER + encoded;
+  return mediaServer() + encoded;
 }

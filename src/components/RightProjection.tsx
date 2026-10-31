@@ -21,7 +21,7 @@ export function RightProjection({
   setIsBaseScreenProjected, ticker, clock, isContentHidden, isCameraActive, selectedCamera, currentTime,
   overlayColor,
   projectedPdfPage, commandProjectedPage, projectedNumPages, setProjectedNumPages,
-  width, bgFilters, header, transition, activeCategory, parallels, parallelStyle, onShrinkText, slideSplit
+  width, bgFilters, header, transition, parallels, parallelStyle, onShrinkText, slideSplit
 }: any) {
   const isProjectedPdf = projectedSong?.type === 'document' && /\.pdf(\?.*)?$/i.test(projectedSong?.lyrics || "");
 
@@ -51,7 +51,9 @@ export function RightProjection({
 
   // Entête telle qu'elle partira à l'écran. Jusqu'ici l'aperçu ne l'affichait
   // pas : on ne découvrait un chevauchement avec l'horloge qu'en projetant.
-  const projectedIsBible = projectedSong?.type === 'bible' || activeCategory === 'bible';
+  // L'aperçu suit le contenu PROJETÉ, pas l'onglet ouvert : sinon, préparer un
+  // cantique pendant qu'un verset est à l'écran changeait l'aperçu du verset.
+  const projectedIsBible = projectedSong?.type === 'bible';
   const headerConf = withHeaderDefaults(header);
   const headerText = (!isBaseScreenProjected && projectedSong && headerConf.enabled)
     ? buildHeaderText(
@@ -87,7 +89,13 @@ export function RightProjection({
   }, [showNext]);
 
   const previewVideoRef = useRef<HTMLVideoElement>(null);
-  const verses = activeSong ? getSlides(activeSong, slideSplit) : [];
+  // Mémoïsé : `getSlides` renvoyait un TABLEAU NEUF à chaque rendu, et ce
+  // tableau sert de dépendance à l'écouteur clavier plus bas. L'écouteur
+  // global était donc retiré puis réinstallé à chaque rendu du composant.
+  const verses = useMemo(
+    () => (activeSong ? getSlides(activeSong, slideSplit) : []),
+    [activeSong, slideSplit]
+  );
 
   // Ce qui arrivera au prochain appui sur la flèche. Vide sur la dernière
   // diapo : la flèche ramène alors à l'écran d'accueil.

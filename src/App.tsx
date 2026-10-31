@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Toolbar } from './components/Toolbar';
 import { LeftSidebar } from './components/LeftSidebar';
@@ -17,6 +17,22 @@ import { DEFAULT_PARALLEL, withParallelDefaults } from './lib/parallel';
 import { DEFAULT_HEADER, buildHeaderText } from './lib/header';
 import { DEFAULT_ANNOUNCEMENTS, announcementSlides, withAnnouncementDefaults } from './lib/announcements';
 import { DEFAULT_STAGE, withStageDefaults } from './lib/stage';
+
+/**
+ * Catégorie de réglages d'un élément, déduite de L'ÉLÉMENT — jamais de
+ * l'onglet affiché.
+ *
+ * C'est la correction d'un comportement déroutant : on projetait un verset,
+ * on basculait sur l'onglet Cantiques pour préparer la suite, et la
+ * projection en cours se mettait à être traitée comme un chant (entête,
+ * numéro de verset, réglages hérités). Ce qui est à l'écran ne doit dépendre
+ * que de ce qui a été projeté.
+ *
+ * Les éléments d'agenda restent rangés avec les chants, comme avant : les
+ * déplacer dans leur propre catégorie changerait l'apparence déjà réglée
+ * chez les utilisateurs.
+ */
+const categoryOf = (item: any): string => (item?.type === 'bible' ? 'bible' : 'hymnes');
 
 function App() {
   const [songs, setSongs] = useState<any[]>([]);
@@ -132,6 +148,12 @@ function App() {
     invoke<string>('get_app_data_path').then(path => {
       localStorage.setItem('appDataPath', path);
     }).catch(console.error);
+    // Port réellement retenu par le serveur média : il peut différer de 11223
+    // si ce dernier était occupé. Sans cette lecture, tous les médias locaux
+    // pointeraient vers un port mort.
+    invoke<number>('media_server_port').then(port => {
+      localStorage.setItem('mediaPort', String(port));
+    }).catch(console.error);
   }, []);
 
   useEffect(() => {
@@ -165,7 +187,7 @@ function App() {
           setActiveSong(playlist[0]);
           setActiveVerseIdx(0);
           setIsBaseScreenProjected(false);
-          setLiveCategory(playlist[0].type === 'bible' ? 'bible' : 'hymnes');
+          setLiveCategory(categoryOf(playlist[0]));
           // La présentation démarre : les flèches doivent répondre tout de
           // suite, même si on venait juste de taper dans la recherche.
           focusSlideList();
@@ -266,7 +288,7 @@ function App() {
         decorations: false,
         skipTaskbar: true,
         alwaysOnTop: true,
-        focus: false
+        focus: false,
       };
 
       if (monitors.length > 1) {
@@ -278,6 +300,25 @@ function App() {
       const w = new WebviewWindow('live', opts);
 
       setIsLiveActive(true);
+
+      // Lecture automatique du fond vidéo.
+      //
+      // WebKitGTK fige la politique média à la création du document. La
+      // fenêtre principale la reçoit dans `setup()`, avant son premier
+      // chargement — ses vidéos démarrent seules. Celle-ci est créée plus
+      // tard : son premier document naît sans la politique, d'où le bouton
+      // « play » au milieu du fond.
+      //
+      // On la pose donc puis on recharge : le SECOND document l'a. Le
+      // rechargement se produit sur un écran encore noir, avant tout contenu.
+      //
+      // Tout échec ici est sans gravité : la projection fonctionne, seul le
+      // démarrage automatique du fond vidéo serait perdu.
+      setTimeout(() => {
+        invoke('prime_live_webview').catch((e) =>
+          console.warn('Lecture automatique du fond non préparée:', e)
+        );
+      }, 600);
 
       // Listen to window destruction to reset state instantly
       w.once('tauri://destroyed', () => {
@@ -360,7 +401,7 @@ function App() {
         parallel: { ...DEFAULT_PARALLEL }
       };
     }
-    const category = categoryOverride || (song?.type === 'bible' ? 'bible' : 'hymnes');
+    const category = categoryOverride || categoryOf(song);
     const baseCategoryStyle = defaultStyles[category] || defaultStyles.chant;
     let txt = { ...baseCategoryStyle.textSettings, ...(settingsByCategory[category]?.textSettings || {}) };
     let bg = settingsByCategory[category]?.bgImage || baseCategoryStyle.bgImage;
@@ -445,7 +486,7 @@ function App() {
   // passages serait du gaspillage, alors que le verset, lui, n'a pas changé.
   const [parallelVerses, setParallelVerses] = useState<any[]>([]);
   const liveParallel = withParallelDefaults(computedLiveSettings.parallel);
-  const projectedIsBible = liveCategory === 'bible' || projectedSong?.type === 'bible';
+  const projectedIsBible = projectedSong?.type === 'bible';
 
   useEffect(() => {
     if (!projectedIsBible || isBaseScreenProjected || liveParallel.versions.length === 0
@@ -590,7 +631,15 @@ function App() {
 
     if (!isBaseScreenProjected && projectedSong) {
       if (['image', 'video', 'document', 'audio', 'youtube', 'link'].includes(projectedSong.type)) {
-        mediaObj = { type: projectedSong.type, url: projectedSong.lyrics };
+        mediaObj = {
+          type: projectedSong.type,
+          url: projectedSong.lyrics,
+          // Pour un lien : vrai si le site accepte d'être affiché en cadre.
+          // Vérifié à l'ajout ; `undefined` pour les liens ajoutés avant que
+          // cette vérification existe, qu'on affiche alors comme avant.
+          embeddable: projectedSong.embeddable,
+          title: projectedSong.title,
+        };
       } else if (projectedSong.type === 'markdown') {
         // Le Markdown garde sa structure : on transmet la diapo courante telle
         // quelle, la fenêtre de projection s'occupe du rendu.
@@ -605,7 +654,7 @@ function App() {
         const safeIdx = Math.max(0, Math.min(projectedVerseIdx, verses.length - 1));
         const currentVerse = verses[safeIdx] || "";
         const lines = currentVerse.split('\n');
-        const isBible = (liveCategory === 'bible' || projectedSong.type === 'bible');
+        const isBible = projectedSong.type === 'bible';
 
         // Le numéro du verset est la première ligne de la diapo biblique :
         // c'est lui qui complète la référence (« Jean 3 » → « Jean 3:16 »).
@@ -801,7 +850,9 @@ function App() {
 
   const getEditingContext = () => {
     // Determine the base style to start from for the toolbar
-    const category = (editingScope === 'category') ? activeCategory : (activeSong?.type === 'bible' ? 'bible' : 'hymnes');
+    // Portée « catégorie » = l'onglet, c'est son sens même (« Tout : chants »).
+    // Toute portée plus précise suit en revanche l'élément sélectionné.
+    const category = (editingScope === 'category') ? activeCategory : categoryOf(activeSong);
     const baseStyle = settingsByCategory[category] || defaultStyles.chant;
 
     let txt = { ...baseStyle.textSettings };
@@ -937,18 +988,58 @@ function App() {
   // dans la liste des versions supplémentaires.
   const [activeBibleDb, setActiveBibleDb] = useState("");
 
+  /**
+   * Bases déjà chargées, par « catégorie:fichier ».
+   *
+   * Mesuré : une bible représente ~5 Mo de JSON à sérialiser côté Rust,
+   * transférer, puis parser côté interface (1 188 chapitres avec leur texte).
+   * Or l'effet qui choisit la base se redéclenche à CHAQUE bascule d'onglet,
+   * et le fichier actif appartient alors à l'autre catégorie : ces 5 Mo
+   * étaient donc repayés à chaque aller-retour entre Cantiques et Bibles.
+   * C'est la principale cause de lenteur ressentie.
+   *
+   * Le cache est invalidé par l'évènement `dbs_changed`, émis par le backend
+   * quand un module est installé ou supprimé.
+   */
+  const dbCache = useRef<Map<string, any[]>>(new Map());
+  const loadedKey = useRef<string>("");
+
+  useEffect(() => {
+    let unlisten: any;
+    import('@tauri-apps/api/event').then(({ listen }) => {
+      listen('dbs_changed', () => dbCache.current.clear()).then(u => { unlisten = u; });
+    });
+    return () => { if (unlisten) unlisten(); };
+  }, []);
+
   const loadDbData = async (category: string, dbName: string) => {
-    setIsLoading(true);
+    const key = `${category}:${dbName}`;
     setActiveCategory(category);
     if (category === "bible") setActiveBibleDb(dbName);
+
+    if (!dbName) { setSongs([]); loadedKey.current = key; return; }
+
+    const cached = dbCache.current.get(key);
+    if (cached) {
+      loadedKey.current = key;
+      setSongs(cached);
+      return;
+    }
+
+    setIsLoading(true);
     try {
-      if (category === "hymnes") {
-        const result: any[] = await invoke("fetch_hymns", { dbName });
-        setSongs(result);
-      } else if (category === "bible") {
-        const result: any[] = await invoke("fetch_bible", { dbName });
-        setSongs(result);
+      const command = category === "hymnes" ? "fetch_hymns" : "fetch_bible";
+      const result: any[] = await invoke(command, { dbName });
+      // Trois bases couvrent le va-et-vient habituel (un recueil, une ou deux
+      // bibles) ; au-delà on libère la plus ancienne, une bible pesant
+      // plusieurs méga-octets en mémoire.
+      if (dbCache.current.size >= 3) {
+        const oldest = dbCache.current.keys().next().value;
+        if (oldest) dbCache.current.delete(oldest);
       }
+      dbCache.current.set(key, result);
+      loadedKey.current = key;
+      setSongs(result);
     } catch (e) {
       console.error("Failed to load DB", e);
     } finally {
@@ -1067,7 +1158,13 @@ function App() {
             setPlaylist((prev: any[]) => prev.map(item => item.id === updatedSong.id ? updatedSong : item));
             // Rafraîchit aussi la liste source, sinon l'ancien titre/texte
             // réapparaît quand on re-sélectionne le chant depuis la sidebar.
-            setSongs((prev: any[]) => prev.map(s => (s.id === updatedSong.id && s.book === updatedSong.book) ? updatedSong : s));
+            setSongs((prev: any[]) => {
+              const next = prev.map(s => (s.id === updatedSong.id && s.book === updatedSong.book) ? updatedSong : s);
+              // Sans ça, revenir sur l'onglet rechargerait la version d'avant
+              // depuis le cache.
+              if (loadedKey.current) dbCache.current.set(loadedKey.current, next);
+              return next;
+            });
           }}
           pdfWidth={pdfWidth}
           setPdfWidth={setPdfWidth}
@@ -1080,7 +1177,7 @@ function App() {
             setProjectedSong(activeSong);
             setProjectedVerseIdx(0);
             setIsBaseScreenProjected(false);
-            setLiveCategory(activeCategory);
+            setLiveCategory(categoryOf(activeSong));
             commandProjectedPage(page);
           }}
         />
@@ -1107,14 +1204,13 @@ function App() {
           previewSettings={previewSettings.textSettings}
           previewBg={previewSettings.bgImage}
           isLiveActive={isLiveActive}
-          isBibleView={activeCategory === 'bible'}
           activeVerseIdx={activeVerseIdx}
           setActiveVerseIdx={setActiveVerseIdx}
           onProject={(song: any, idx: number) => {
             setProjectedSong(song);
             setProjectedVerseIdx(idx);
             setIsBaseScreenProjected(false);
-            setLiveCategory(activeCategory);
+            setLiveCategory(categoryOf(song));
             if (song?.type === 'document') commandProjectedPage(1);
             else setProjectedPdfPage(1);
           }}
@@ -1124,7 +1220,6 @@ function App() {
           setProjectedNumPages={setProjectedNumPages}
           isBaseScreenProjected={isBaseScreenProjected}
           setIsBaseScreenProjected={setIsBaseScreenProjected}
-          activeCategory={activeCategory}
           ticker={tickerSettings}
           clock={clockSettings}
           header={computedLiveSettings.header}

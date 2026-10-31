@@ -221,7 +221,13 @@ export function LiveView() {
     try { return withBgDefaults(JSON.parse(localStorage.getItem('live_bg_filters') || 'null')); }
     catch { return { ...DEFAULT_BG_FILTERS }; }
   });
-  const [mediaOverlay, setMediaOverlay] = useState<{ type: string, url: string } | null>(() => {
+  const [mediaOverlay, setMediaOverlay] = useState<{
+    type: string;
+    url: string;
+    /** Lien web : le site accepte-t-il d'être affiché en cadre ? */
+    embeddable?: boolean;
+    title?: string;
+  } | null>(() => {
     const saved = localStorage.getItem('live_media');
     return saved ? JSON.parse(saved) : null;
   });
@@ -731,13 +737,34 @@ export function LiveView() {
             {mediaOverlay.type === 'youtube' && (
               <iframe
                 width="100%" height="100%"
-                src={`https://www.youtube.com/embed/${mediaOverlay.url}?autoplay=1&mute=0`}
+                /* `playsinline` évite le passage en plein écran natif sur
+                   certaines plateformes, `rel=0` supprime les vidéos suggérées
+                   d'autres chaînes à la fin — on ne veut pas de recommandations
+                   YouTube devant l'assemblée. */
+                src={`https://www.youtube.com/embed/${mediaOverlay.url}?autoplay=1&mute=0&playsinline=1&rel=0&modestbranding=1`}
                 title="YouTube Video" frameBorder="0"
                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                 allowFullScreen
               ></iframe>
             )}
-            {mediaOverlay.type === 'link' && <iframe src={mediaOverlay.url} className="w-full h-full border-none bg-white" title="Web Link" />}
+            {mediaOverlay.type === 'link' && (
+              mediaOverlay.embeddable === false ? (
+                /* Le site refuse d'être affiché dans un cadre (vérifié à
+                   l'ajout). Plutôt qu'une page blanche devant l'assemblée, on
+                   affiche l'adresse en grand : elle reste utile, on peut la
+                   noter ou la saisir. */
+                <div className="flex h-full w-full flex-col items-center justify-center gap-6 bg-black px-12 text-center">
+                  <span className="text-[2.2vh] font-bold uppercase tracking-[0.3em] text-gray-500">
+                    À consulter
+                  </span>
+                  <span className="break-all text-[5vh] font-black leading-tight text-white">
+                    {mediaOverlay.url.replace(/^https?:\/\//, '')}
+                  </span>
+                </div>
+              ) : (
+                <iframe src={mediaOverlay.url} className="w-full h-full border-none bg-white" title="Web Link" />
+              )
+            )}
             {mediaOverlay.type === 'document' && (
               <div style={{ position: 'fixed', inset: 0, backgroundColor: 'white', display: 'grid', gridTemplateColumns: '1fr', gridTemplateRows: '1fr', zIndex: 90 }}>
                 {textContent ? (

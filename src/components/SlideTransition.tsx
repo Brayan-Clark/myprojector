@@ -39,32 +39,54 @@ export function SlideTransition({
   const { type, duration } = withTransitionDefaults(settings);
   const { enter, exit } = transitionClasses(type);
 
-  const [previous, setPrevious] = useState<{ key: string; node: ReactNode } | null>(null);
-  // `key` suit la diapo affichée ; `node` garde le rendu précédent.
-  const current = useRef<{ key: string; node: ReactNode }>({ key: contentKey, node: children });
-  const timer = useRef<number | undefined>(undefined);
+  const animated = type !== "none" && duration > 0;
 
+  /**
+   * Couche sortante, décidée PENDANT le rendu.
+   *
+   * ⚠ C'était fait dans un `useEffect`, donc une image trop tard. Le
+   * déroulement était le suivant :
+   *
+   *   1. la diapo change, React remplace la couche (sa `key` change) :
+   *      l'ancienne disparaît du DOM ;
+   *   2. le navigateur peut peindre cette image — la nouvelle diapo y est
+   *      encore à `opacity: 0`, donc l'écran est VIDE ;
+   *   3. l'effet s'exécute enfin et réinsère l'ancienne pour qu'elle
+   *      s'efface.
+   *
+   * L'ancienne diapo disparaissait donc, puis revenait : c'est le
+   * clignotement qu'on voyait à chaque changement. Mettre l'état à jour
+   * pendant le rendu fait recommencer le rendu immédiatement, AVANT toute
+   * peinture : les deux couches arrivent dans la même image.
+   */
+  const [shown, setShown] = useState<{ key: string; prev: { key: string; node: ReactNode } | null }>(
+    () => ({ key: contentKey, prev: null })
+  );
+  const lastChildren = useRef<ReactNode>(children);
+
+  if (shown.key !== contentKey) {
+    setShown({
+      key: contentKey,
+      prev: animated && keepPrevious ? { key: shown.key, node: lastChildren.current } : null,
+    });
+  }
+  // Après la comparaison : on garde le rendu de CETTE diapo pour le jour où
+  // elle deviendra la sortante.
+  lastChildren.current = children;
+
+  const previous = shown.prev;
+
+  // Retrait de la couche sortante quand l'animation est finie.
   useEffect(() => {
-    const previousEntry = current.current;
-    current.current = { key: contentKey, node: children };
-    if (previousEntry.key === contentKey) return; // même diapo, contenu rafraîchi
+    if (!previous) return;
+    const t = window.setTimeout(
+      () => setShown((s) => (s.prev ? { ...s, prev: null } : s)),
+      duration
+    );
+    return () => window.clearTimeout(t);
+  }, [previous, duration]);
 
-    if (type === "none" || duration === 0) {
-      setPrevious(null);
-      return;
-    }
-    if (keepPrevious) setPrevious(previousEntry);
-
-    window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => setPrevious(null), duration);
-    // `children` est volontairement hors des dépendances : seul le changement
-    // de diapo déclenche une transition (voir le commentaire plus haut).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contentKey, type, duration, keepPrevious]);
-
-  useEffect(() => () => window.clearTimeout(timer.current), []);
-
-  if (type === "none" || duration === 0) {
+  if (!animated) {
     return <div className={className}>{children}</div>;
   }
 

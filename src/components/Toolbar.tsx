@@ -386,10 +386,14 @@ export function Toolbar({
               Tout : {activeCategory === 'bible' ? 'textes bibliques' : 'chants'}
             </option>
             {activeSong?.book && <option value="book">Le livre « {activeSong.book} »</option>}
-            {activeSong?.id && (
+            {/* `!= null` et non une simple véracité : le premier chapitre
+                d'une bible porte l'identifiant 0, que `&&` traite comme
+                absent. Les portées « Ce chapitre » et « Ce verset »
+                disparaissaient donc pour Genèse 1 — et seulement pour elle. */}
+            {activeSong?.id != null && (
               <option value="song">{activeSong?.type === 'bible' ? 'Ce chapitre' : 'Ce chant'}</option>
             )}
-            {activeSong?.id && activeVerseIdx !== -1 && (
+            {activeSong?.id != null && activeVerseIdx !== -1 && (
               <option value="verse">{activeSong?.type === 'bible' ? 'Ce verset' : 'Cette diapo'}</option>
             )}
           </Select>

@@ -62,7 +62,14 @@ export function forceBackgroundPlayback(el: HTMLVideoElement, src: string, label
     if (p && typeof p.catch === "function") {
       p.catch((e: unknown) => {
         const name = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-        console.warn(`[${label}] play() refusé -> ${name}`, el.error ? `| ${describeVideoError(el)}` : "");
+        const detail = `${label} play() refusé -> ${name}${el.error ? ` | ${describeVideoError(el)}` : ""}`
+          + ` | muted=${el.muted} readyState=${el.readyState} src=${(el.currentSrc || "").slice(-40)}`;
+        console.warn(detail);
+        // Remonté au terminal : sans ça, l'échec reste invisible dans la
+        // fenêtre de projection, qui n'a pas de console accessible.
+        import("@tauri-apps/api/core")
+          .then(({ invoke }) => invoke("debug_log", { message: detail }))
+          .catch(() => {});
       });
     }
   };

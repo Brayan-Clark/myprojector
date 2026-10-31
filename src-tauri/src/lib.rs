@@ -430,6 +430,16 @@ fn safe_category(category: &str) -> Result<(), String> {
 #[derive(Serialize, Deserialize)]
 pub struct Song {
     pub id: i64,
+    /// Nature de l'élément : "hymnes" ou "bible".
+    ///
+    /// ⚠ Renseigné ICI, à la source, et pas côté interface. Il ne l'était
+    /// nulle part : `type` n'existait que sur les éléments d'agenda, alors
+    /// qu'une dizaine d'endroits testaient `type === 'bible'`. Tous
+    /// concluaient « ce n'est pas la Bible » — d'où un chapitre enregistré
+    /// vers `data/hymnes/<Livre>.db`, et des réglages de chapitre rangés
+    /// dans la catégorie des chants.
+    #[serde(rename = "type", default)]
+    pub song_type: String,
     pub number: String,
     pub title: String,
     pub lyrics: String,
@@ -510,6 +520,7 @@ fn fetch_hymns_blocking(app_handle: &tauri::AppHandle, db_name: &str) -> Result<
             let playback: Option<String> = row.get(4).unwrap_or(None);
             Ok(Song {
                 id: row.get(0)?,
+                song_type: "hymnes".to_string(),
                 number: num.to_string(),
                 title: row.get(2)?,
                 lyrics: row.get(3)?,
@@ -601,6 +612,7 @@ fn fetch_bible_blocking(app_handle: &tauri::AppHandle, db_name: &str) -> Result<
             if !current_title.is_empty() {
                 songs.push(Song {
                     id: current_id as i64,
+                    song_type: "bible".to_string(),
                     number: current_chapter.to_string(),
                     title: current_title.clone(),
                     lyrics: current_content.clone(),
@@ -629,6 +641,7 @@ fn fetch_bible_blocking(app_handle: &tauri::AppHandle, db_name: &str) -> Result<
     if !current_title.is_empty() {
         songs.push(Song {
             id: current_id as i64,
+            song_type: "bible".to_string(),
             number: current_chapter.to_string(),
             title: current_title,
             lyrics: current_content,
@@ -906,6 +919,271 @@ fn parallel_verse_blocking(
     Ok(None)
 }
 
+// ---------------------------------------------------------------------------
+// Un lien web peut-il être affiché DANS l'application ?
+//
+// La plupart des grands sites l'interdisent (`X-Frame-Options: SAMEORIGIN` ou
+// `Content-Security-Policy: frame-ancestors`). Mesuré : Google, GitHub et
+// jw.org refusent ; Wikipédia accepte. Sans vérification, l'opérateur ajoute
+// un lien, le projette pendant le culte, et l'assemblée voit une page blanche.
+//
+// On le dit donc AU MOMENT DE L'AJOUT, quand c'est encore réparable.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+pub struct EmbedCheck {
+    /// Le site accepte d'être affiché dans un cadre.
+    pub embeddable: bool,
+    /// Le site a répondu (faux = hors ligne, adresse morte, délai dépassé).
+    pub reachable: bool,
+    /// Explication en clair, destinée à être affichée telle quelle.
+    pub reason: String,
+}
+
+#[tauri::command]
+async fn check_embeddable(url: String) -> Result<EmbedCheck, String> {
+    let client = reqwest::Client::builder()
+        // Court : on bloque l'opérateur pendant ce temps, et un site lent à
+        // répondre sera de toute façon pénible en projection.
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // GET et non HEAD : beaucoup de serveurs répondent 405 à un HEAD, ou
+    // n'y renvoient pas les entêtes de sécurité.
+    let response = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(EmbedCheck {
+                embeddable: false,
+                reachable: false,
+                reason: if e.is_timeout() {
+                    "Le site n'a pas répondu dans les délais.".into()
+                } else {
+                    "Site injoignable (pas de connexion, ou adresse incorrecte).".into()
+                },
+            })
+        }
+    };
+
+    let headers = response.headers();
+    let xfo = headers
+        .get("x-frame-options")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+    let csp = headers
+        .get("content-security-policy")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let frame_ancestors = csp
+        .split(';')
+        .map(|d| d.trim())
+        .find(|d| d.starts_with("frame-ancestors"));
+
+    // `frame-ancestors` fait autorité sur X-Frame-Options quand les deux sont
+    // présents. On n'accepte que 'self' absent ET une liste permissive.
+    let blocked_by_csp = match frame_ancestors {
+        Some(d) => !(d.contains('*') || d.contains("https:")),
+        None => false,
+    };
+    let blocked_by_xfo = xfo.contains("deny") || xfo.contains("sameorigin");
+
+    if blocked_by_csp || blocked_by_xfo {
+        return Ok(EmbedCheck {
+            embeddable: false,
+            reachable: true,
+            reason: "Ce site interdit d'être affiché dans une autre application. \
+                     Il apparaîtra vide en projection."
+                .into(),
+        });
+    }
+
+    Ok(EmbedCheck {
+        embeddable: true,
+        reachable: true,
+        reason: format!("Site joignable ({}), affichage autorisé.", response.status().as_u16()),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Documents bureautiques (.docx, .pptx, .odp…) — via la suite INSTALLÉE
+//
+// L'application sait afficher du PDF, du texte et des images, mais pas un
+// traitement de texte ni une présentation. Plutôt que d'embarquer un moteur de
+// rendu (des dizaines de méga-octets, et un rendu toujours approximatif), on
+// se sert de la suite bureautique déjà installée sur le poste pour convertir
+// en PDF — puis on réutilise l'affichage PDF existant, avec sa navigation de
+// pages et sa projection.
+//
+// Conséquences assumées :
+//   • Le rendu est celui de LibreOffice, donc fidèle au fichier d'origine.
+//   • Les animations d'un .pptx sont perdues : il reste les diapos. Ce n'est
+//     pas une régression, l'application ne les affichait pas du tout avant —
+//     et elle a ses propres transitions.
+//   • Rien n'est imposé : sans suite installée, tout le reste fonctionne et
+//     l'application le dit clairement au lieu d'échouer en silence.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+pub struct OfficeStatus {
+    pub available: bool,
+    /// Chemin du binaire trouvé, pour le Check système.
+    pub path: String,
+    pub version: String,
+}
+
+/// Binaire de la suite bureautique, s'il y en a une.
+fn office_binary() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    let candidates: Vec<std::path::PathBuf> = vec![
+        r"C:\Program Files\LibreOffice\program\soffice.exe".into(),
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe".into(),
+    ];
+    #[cfg(target_os = "macos")]
+    let candidates: Vec<std::path::PathBuf> =
+        vec!["/Applications/LibreOffice.app/Contents/MacOS/soffice".into()];
+    #[cfg(target_os = "linux")]
+    let candidates: Vec<std::path::PathBuf> = vec![
+        "/usr/bin/soffice".into(),
+        "/usr/bin/libreoffice".into(),
+        "/usr/local/bin/soffice".into(),
+        "/snap/bin/libreoffice".into(),
+        "/var/lib/flatpak/exports/bin/org.libreoffice.LibreOffice".into(),
+    ];
+
+    for c in candidates {
+        if c.exists() {
+            return Some(c);
+        }
+    }
+    // Dernier recours : le PATH.
+    for name in ["soffice", "libreoffice"] {
+        if let Ok(out) = Command::new("which").arg(name).output() {
+            if out.status.success() {
+                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !p.is_empty() {
+                    return Some(p.into());
+                }
+            }
+        }
+    }
+    None
+}
+
+#[tauri::command]
+fn office_status() -> OfficeStatus {
+    match office_binary() {
+        Some(path) => {
+            let version = Command::new(&path)
+                .arg("--version")
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+            OfficeStatus { available: true, path: path.to_string_lossy().into(), version }
+        }
+        None => OfficeStatus {
+            available: false,
+            path: String::new(),
+            version: String::new(),
+        },
+    }
+}
+
+/// Convertit un document en PDF et renvoie le chemin du PDF produit.
+///
+/// Le résultat est mis en cache : une conversion prend plusieurs secondes
+/// (mesuré : 4,7 s pour 13 diapos), ce qui est inacceptable en plein culte.
+/// On convertit donc à l'import, une seule fois.
+#[tauri::command]
+async fn convert_office_to_pdf(
+    app_handle: tauri::AppHandle,
+    source_path: String,
+) -> Result<String, String> {
+    let binary = office_binary()
+        .ok_or_else(|| "Aucune suite bureautique installée.".to_string())?;
+
+    let source = std::path::PathBuf::from(&source_path);
+    let meta = fs::metadata(&source).map_err(|e| format!("Fichier illisible : {e}"))?;
+    let stamp = format!(
+        "{}-{}",
+        meta.len(),
+        meta.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    );
+    let stem = source
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "document".into());
+    let safe_stem: String = stem
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+
+    let mut out_dir = get_data_root(&app_handle)?;
+    out_dir.push("media");
+    fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+    let final_pdf = out_dir.join(format!("{safe_stem}-{stamp}.pdf"));
+
+    // Déjà converti et inchangé depuis : on ressort le cache.
+    if final_pdf.exists() {
+        return Ok(final_pdf.to_string_lossy().to_string());
+    }
+
+    let mut profile_dir = get_data_root(&app_handle)?;
+    profile_dir.push("cache");
+    profile_dir.push("office-profile");
+    fs::create_dir_all(&profile_dir).map_err(|e| e.to_string())?;
+
+    let work_dir = out_dir.clone();
+    let source_for_task = source.clone();
+    let final_for_task = final_pdf.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let status = Command::new(&binary)
+            // ⚠ Profil DÉDIÉ. Sans lui, si l'utilisateur a déjà LibreOffice
+            // ouvert, la commande headless rejoint l'instance en cours et la
+            // conversion échoue sans produire de fichier — panne que l'on ne
+            // reproduit jamais sur un poste de développement.
+            .arg(format!(
+                "-env:UserInstallation=file://{}",
+                profile_dir.to_string_lossy()
+            ))
+            .args(["--headless", "--norestore", "--convert-to", "pdf", "--outdir"])
+            .arg(&work_dir)
+            .arg(&source_for_task)
+            .output()
+            .map_err(|e| format!("Conversion impossible : {e}"))?;
+
+        // LibreOffice nomme le résultat d'après le fichier source : on le
+        // renomme pour y inclure l'empreinte qui sert de cache.
+        let produced = work_dir.join(format!(
+            "{}.pdf",
+            source_for_task
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default()
+        ));
+
+        if !produced.exists() {
+            return Err(format!(
+                "La conversion n'a rien produit. {}",
+                String::from_utf8_lossy(&status.stderr).trim()
+            ));
+        }
+        fs::rename(&produced, &final_for_task).map_err(|e| e.to_string())?;
+        Ok(final_for_task.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn update_song(
     app_handle: tauri::AppHandle,
@@ -1017,6 +1295,14 @@ async fn download_db(app_handle: tauri::AppHandle, url: String, category: String
     file.write_all(&bytes).map_err(|e| e.to_string())?;
 
     println!("Download complete: {:?}", dest_path);
+
+    // L'interface garde les bases chargées en mémoire pour ne pas les relire à
+    // chaque bascule d'onglet. Sans ce signal, un module réinstallé pendant la
+    // session continuerait d'afficher l'ancien contenu.
+    {
+        use tauri::Emitter;
+        let _ = app_handle.emit("dbs_changed", &filename);
+    }
     Ok(())
 }
 
@@ -1738,14 +2024,32 @@ fn run_diagnostics(app_handle: tauri::AppHandle) -> Result<Vec<Check>, String> {
     checks.push(check_gstreamer());
     checks.push(check_autoplay());
 
+    // Suite bureautique : facultative, mais c'est elle qui permet de projeter
+    // un .docx ou un .pptx. Sans elle le reste fonctionne — on l'indique donc
+    // comme une information, pas comme une erreur.
+    {
+        let office = office_status();
+        checks.push(if office.available {
+            check("office", "Documents Word / PowerPoint", "ok",
+                format!("{} — conversion disponible.",
+                    office.version.lines().next().unwrap_or("Suite bureautique détectée")),
+                None)
+        } else {
+            check("office", "Documents Word / PowerPoint", "warn",
+                "Aucune suite bureautique installée : les .docx et .pptx ne pourront pas être projetés.".into(),
+                Some("Installez LibreOffice (libreoffice.org) ou ONLYOFFICE, puis relancez l'application.".into()))
+        });
+    }
+
     // Serveur média local : on tente une vraie connexion TCP.
     let server = std::net::TcpStream::connect_timeout(
-        &"127.0.0.1:11223".parse().map_err(|e| format!("{}", e))?,
+        &format!("127.0.0.1:{}", MEDIA_PORT.load(std::sync::atomic::Ordering::Relaxed))
+            .parse().map_err(|e| format!("{}", e))?,
         std::time::Duration::from_millis(600),
     );
     checks.push(match server {
         Ok(_) => check("server", "Serveur média local", "ok",
-            "Actif sur 127.0.0.1:11223.".into(), None),
+            format!("Actif sur 127.0.0.1:{}.", MEDIA_PORT.load(std::sync::atomic::Ordering::Relaxed)), None),
         Err(e) => check("server", "Serveur média local", "error",
             format!("Injoignable ({}). Fonds, médias et PDF ne s'afficheront pas.", e),
             Some("Redémarrer l'application".into())),
@@ -2179,6 +2483,10 @@ fn delete_db(app_handle: tauri::AppHandle, category: &str, filename: &str) -> Re
     if db_path.exists() {
         fs::remove_file(db_path).map_err(|e| e.to_string())?;
     }
+    {
+        use tauri::Emitter;
+        let _ = app_handle.emit("dbs_changed", filename);
+    }
     Ok(())
 }
 
@@ -2222,7 +2530,23 @@ fn import_background(app_handle: tauri::AppHandle, source_path: String) -> Resul
     let mut dest_path = dest_dir.clone();
     dest_path.push(filename);
 
-    fs::copy(src, &dest_path).map_err(|e| e.to_string())?;
+    // ⚠ Le fichier est-il DEJA a sa place ? Un `fs::copy` d'un fichier vers
+    // lui-meme le TRONQUE A ZERO : le systeme ouvre la destination en ecriture
+    // (donc la vide) avant d'en lire la source.
+    //
+    // C'est ce qui est arrive aux documents convertis : la conversion deposait
+    // le PDF dans `media/`, puis l'import le recopiait par-dessus - d'ou des
+    // PDF de 0 octet, et le message « fichier PDF vide » a l'affichage.
+    let same_file = src
+        .canonicalize()
+        .ok()
+        .zip(dest_path.canonicalize().ok())
+        .map(|(a, b)| a == b)
+        .unwrap_or(false);
+
+    if !same_file {
+        fs::copy(src, &dest_path).map_err(|e| e.to_string())?;
+    }
 
     // Compression automatique en arrière-plan : si le fichier est trop lourd,
     // il est remplacé "en place" par une version allégée (même chemin, donc
@@ -2293,7 +2617,23 @@ fn import_media(app_handle: tauri::AppHandle, source_path: String) -> Result<Str
     let mut dest_path = dest_dir.clone();
     dest_path.push(filename);
 
-    fs::copy(src, &dest_path).map_err(|e| e.to_string())?;
+    // ⚠ Le fichier est-il DEJA a sa place ? Un `fs::copy` d'un fichier vers
+    // lui-meme le TRONQUE A ZERO : le systeme ouvre la destination en ecriture
+    // (donc la vide) avant d'en lire la source.
+    //
+    // C'est ce qui est arrive aux documents convertis : la conversion deposait
+    // le PDF dans `media/`, puis l'import le recopiait par-dessus - d'ou des
+    // PDF de 0 octet, et le message « fichier PDF vide » a l'affichage.
+    let same_file = src
+        .canonicalize()
+        .ok()
+        .zip(dest_path.canonicalize().ok())
+        .map(|(a, b)| a == b)
+        .unwrap_or(false);
+
+    if !same_file {
+        fs::copy(src, &dest_path).map_err(|e| e.to_string())?;
+    }
 
     // Compression automatique en arrière-plan (même logique que les fonds).
     let optimize_target = dest_path.clone();
@@ -2382,8 +2722,123 @@ fn apply_media_settings(webkit_webview: &webkit2gtk::WebView) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Port du serveur média
+//
+// ⚠ Il était figé à 11223, et `warp::serve(...).run(...)` PANIQUE si le port
+// est déjà pris. Le fil mourait alors en silence — l'application continuait,
+// mais plus aucun média local ne s'affichait : fond vidéo noir, image
+// importée absente, PDF vide. Et le message « running on… » s'affichant AVANT
+// le bind, les traces affirmaient que tout allait bien.
+//
+// Cela arrive dès qu'une instance précédente tourne encore (plantage, double
+// lancement) ou qu'un autre logiciel occupe le port.
+//
+// On réserve donc le port au démarrage, avec repli, et on le communique à
+// l'interface par un script d'initialisation — exécuté avant tout autre code
+// de la page, dans TOUTES les fenêtres.
+// ---------------------------------------------------------------------------
+
+static MEDIA_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(11223);
+
+/// Prépare la fenêtre de projection pour la lecture automatique.
+///
+/// ⚠ WebKitGTK fige la politique média À LA CRÉATION DU DOCUMENT. La fenêtre
+/// principale reçoit le réglage dans `setup()`, donc avant son premier
+/// chargement : ses vidéos démarrent seules. La fenêtre de projection, elle,
+/// est créée plus tard ; le plus tôt qu'on puisse la toucher est
+/// `on_page_load`, et c'est déjà trop tard pour son document. D'où le gros
+/// bouton « play » au milieu du fond vidéo, alors que la trace affiche
+/// pourtant « autoplay autorisé ».
+///
+/// On applique donc le réglage, PUIS on recharge : le second document naît
+/// avec la bonne politique. La fenêtre est encore masquée à ce moment-là,
+/// l'assemblée ne voit rien.
+#[tauri::command]
+fn prime_live_webview(app_handle: tauri::AppHandle) -> Result<(), String> {
+    let webview = app_handle
+        .get_webview_window("live")
+        .ok_or_else(|| "Fenêtre de projection introuvable.".to_string())?;
+
+    #[cfg(target_os = "linux")]
+    {
+        webview
+            .with_webview(|pw: tauri::webview::PlatformWebview| {
+                apply_media_settings(&pw.inner());
+            })
+            .map_err(|e| format!("Réglages média non appliqués : {e}"))?;
+    }
+
+    // Le rechargement est ce qui rend le réglage effectif pour le document.
+    webview
+        .eval("location.reload()")
+        .map_err(|e| format!("Rechargement impossible : {e}"))?;
+    Ok(())
+}
+
+/// Renvoie un message de la fenêtre de projection vers le terminal.
+///
+/// La console d'une fenêtre secondaire n'est visible nulle part : un échec de
+/// lecture automatique y restait indiagnosticable. Cette passerelle fait
+/// remonter la raison EXACTE du refus.
+#[tauri::command]
+fn debug_log(message: String) {
+    println!("[webview] {message}");
+}
+
+/// Port réellement utilisé par le serveur média, pour l'interface.
+#[tauri::command]
+fn media_server_port() -> u16 {
+    MEDIA_PORT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Cherche un port libre et le mémorise. Renvoie `None` si aucun n'est
+/// disponible — cas où l'application doit le DIRE, pas faire semblant.
+fn reserve_media_port() -> Option<u16> {
+    // 11224 est réservé à la télécommande : on ne le propose pas.
+    for port in [11223u16, 11225, 11226, 11227, 11228, 11229, 11230] {
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            MEDIA_PORT.store(port, std::sync::atomic::Ordering::Relaxed);
+            if port != 11223 {
+                println!("[media] port 11223 occupé, serveur média replié sur {port}");
+            }
+            return Some(port);
+        }
+    }
+    eprintln!("[media] AUCUN port libre : les médias locaux ne s'afficheront pas.");
+    None
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // --- Une seule instance ------------------------------------------------
+    //
+    // Deux instances se disputent les mêmes ports. Constaté en conditions
+    // réelles : la seconde ne pouvait plus démarrer son serveur média, et
+    // PLUS AUCUN média local ne s'affichait — fond vidéo noir, PDF vide —
+    // sans le moindre message. Le repli de port limite les dégâts, mais deux
+    // instances restent une mauvaise idée : elles écrivent dans les mêmes
+    // fichiers de réglages et pilotent deux fenêtres de projection.
+    //
+    // Le verrou est une prise de port : il disparaît tout seul si
+    // l'application plante, là où un fichier verrou resterait et empêcherait
+    // tout redémarrage.
+    let _instance_lock = match std::net::TcpListener::bind(("127.0.0.1", 11222u16)) {
+        Ok(l) => l,
+        Err(_) => {
+            eprintln!(
+                "MyProjector est déjà lancé. Utilisez la fenêtre existante.\n\
+                 (Si vous pensez que c'est une erreur, fermez l'application puis relancez-la.)"
+            );
+            return;
+        }
+    };
+
+    // Réservé AVANT tout le reste : le port choisi doit être connu au moment
+    // où l'on construit le script d'initialisation des fenêtres.
+    let media_port = reserve_media_port().unwrap_or(11223);
+    println!("[media] serveur média sur le port {media_port}");
+
     #[cfg(target_os = "linux")]
     {
         // Toutes ces variables sont posées UNIQUEMENT si l'utilisateur ne les a
@@ -2470,7 +2925,10 @@ pub fn run() {
                     let host_ok = warp::header::optional::<String>("host")
                         .and_then(|host: Option<String>| async move {
                             match host {
-                                Some(h) if h.starts_with("127.0.0.1:11223") || h.starts_with("localhost:11223") => Ok(()),
+                                Some(h) if {
+                                    let p = MEDIA_PORT.load(std::sync::atomic::Ordering::Relaxed);
+                                    h.starts_with(&format!("127.0.0.1:{p}")) || h.starts_with(&format!("localhost:{p}"))
+                                } => Ok(()),
                                 Some(_) => Err(warp::reject::reject()),
                                 None => Ok(()),
                             }
@@ -2483,8 +2941,12 @@ pub fn run() {
                         .and(warp::fs::dir(_app_data_path))
                         .with(cors);
                     
-                    println!("Media server (AppData only) running on http://127.0.0.1:11223");
-                    warp::serve(fs_route).run(([127, 0, 0, 1], 11223)).await;
+                    // Le port a été réservé AVANT le démarrage de l'application
+                    // (voir `reserve_media_port`), donc ce bind ne peut plus
+                    // échouer sur un port déjà pris.
+                    let port = MEDIA_PORT.load(std::sync::atomic::Ordering::Relaxed);
+                    println!("Media server (AppData only) running on http://127.0.0.1:{port}");
+                    warp::serve(fs_route).run(([127, 0, 0, 1], port)).await;
                 });
             });
 
@@ -2526,6 +2988,31 @@ pub fn run() {
             Ok(())
         })
         .on_page_load(|_webview, _payload| {
+            // Trace par fenêtre : le réglage d'autoplay est global au WebView,
+            // et jusqu'ici rien ne permettait de savoir s'il avait bien pris
+            // dans la fenêtre de PROJECTION, créée après le démarrage. Sans
+            // cette ligne, « la vidéo de fond démarre dans l'aperçu mais pas à
+            // l'écran » reste indiagnosticable.
+            #[cfg(target_os = "linux")]
+            {
+                use std::sync::atomic::Ordering;
+                let label = _webview.label().to_string();
+                println!("[media] on_page_load pour '{}'", label);
+                // ⚠ L'erreur n'est PAS ignorée : `with_webview` échoue si on
+                // n'est pas sur le fil principal, et le `let _ =` d'origine
+                // rendait cet échec totalement invisible.
+                match _webview.with_webview(move |pw: tauri::webview::PlatformWebview| {
+                    apply_media_settings(&pw.inner());
+                    println!(
+                        "[media] webview '{}' : autoplay {}",
+                        label,
+                        if AUTOPLAY_ALLOWED.load(Ordering::Relaxed) == 1 { "autorisé" } else { "REFUSÉ" }
+                    );
+                }) {
+                    Ok(()) => {}
+                    Err(e) => println!("[media] with_webview a échoué : {e}"),
+                }
+            }
             // La fenêtre de projection est créée APRÈS le setup, et
             // `on_window_event` ne se déclenche que sur un évènement (focus,
             // déplacement...) qui peut arriver trop tard. Ce hook-ci passe pour
@@ -2601,6 +3088,12 @@ pub fn run() {
             fetch_bible,
             search_bible,
             fetch_parallel_verse,
+            check_embeddable,
+            media_server_port,
+            debug_log,
+            prime_live_webview,
+            office_status,
+            convert_office_to_pdf,
             update_song,
             list_dbs,
             download_db,

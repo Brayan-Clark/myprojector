@@ -47,6 +47,10 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
   } | null>(null);
   const [promptValue, setPromptValue] = useState('');
   const [promptError, setPromptError] = useState<string | null>(null);
+  // Conversion d'un document bureautique : plusieurs secondes, il faut le
+  // montrer. Et dire clairement quoi installer si aucune suite n'est présente.
+  const [converting, setConverting] = useState<string | null>(null);
+  const [officeNotice, setOfficeNotice] = useState<string | null>(null);
   // Hauteur de l'agenda : un culte à trois chants et un culte à quinze
   // n'ont pas besoin de la même place. Retenue entre deux séances.
   const [agendaHeight, setAgendaHeight, resetAgendaHeight] = usePaneSize(PANES.agenda);
@@ -108,27 +112,35 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
   // Fuse ne trouvait pas "1Jao 3" car le titre indexé s'écrit "1 Jaona 3".
   // On indexe donc aussi une version compacte du titre et l'abréviation
   // officielle du livre (books.short_name).
+  //
+  // ⚠ Uniquement en vue Recueils. Construit systématiquement, cet index
+  // recopiait les 1 188 chapitres d'une bible et alimentait un index Fuse qui
+  // n'est jamais interrogé de ce côté — du travail pur perte à chaque
+  // chargement de bible.
   const searchIndex = useMemo(
-    () => songs.map((s: any) => ({
+    () => view !== 'chant' ? [] : songs.map((s: any) => ({
       ...s,
       _compact: normalize(s.title),
       _abbr: normalize(s.abbr),
       _abbrNum: `${normalize(s.abbr)}${normalize(s.number)}`,
     })),
-    [songs]
+    [songs, view]
   );
 
-  const fuse = useMemo(() => new Fuse(searchIndex, {
-    keys: ['title', 'number', 'book', '_compact', '_abbr', '_abbrNum'],
-    threshold: 0.3,
-    ignoreLocation: true // match anywhere in the title (faster + better for long titles)
-  }), [searchIndex]);
+  const fuse = useMemo(
+    () => (view !== 'chant' ? null : new Fuse(searchIndex, {
+      keys: ['title', 'number', 'book', '_compact', '_abbr', '_abbrNum'],
+      threshold: 0.3,
+      ignoreLocation: true // match anywhere in the title (faster + better for long titles)
+    })),
+    [searchIndex, view]
+  );
 
   // Fuse n'est utile qu'à la liste des recueils. Le lancer aussi en vue Bible
   // faisait une recherche approchée sur 31 000 chapitres à chaque frappe de
   // référence, pour un résultat que personne n'affiche.
   const searchResults = useMemo(() => {
-    if (view !== 'chant') return songs;
+    if (view !== 'chant' || !fuse) return songs;
     return searchTerm ? fuse.search(searchTerm, { limit: 200 }).map(r => r.item) : songs;
   }, [view, fuse, searchTerm, songs]);
 
@@ -454,15 +466,43 @@ Texte en **gras**, en *italique*, et une liste :
         const { open } = await import('@tauri-apps/plugin-dialog');
         const file = await open({
           multiple: false,
-          filters: [{ name: 'Documents', extensions: ['pdf', 'doc', 'docx', 'ppt', 'pptx', 'txt', 'md'] }]
+          filters: [{ name: 'Documents', extensions: ['pdf', 'doc', 'docx', 'ppt', 'pptx', 'odt', 'odp', 'ods', 'xls', 'xlsx', 'rtf', 'txt', 'md'] }]
         });
         if (file && typeof file === 'string') {
-          const httpUrl: string = await invoke('import_media', { sourcePath: file });
           const filename = file.split(/[/\\]/).pop() || 'Document';
+
+          // Document bureautique : on le convertit en PDF avec la suite
+          // installée sur le poste, puis on l'affiche comme n'importe quel
+          // PDF. La conversion prend plusieurs secondes — on la fait ICI, à la
+          // préparation, jamais pendant la projection.
+          let sourceForImport = file;
+          if (/\.(docx?|pptx?|odt|odp|ods|xlsx?|rtf)$/i.test(file)) {
+            const office: any = await invoke('office_status');
+            if (!office?.available) {
+              setOfficeNotice(
+                "Pour projeter un document Word ou PowerPoint, installez une suite bureautique " +
+                "libre — LibreOffice (libreoffice.org) ou ONLYOFFICE. L'application s'en servira " +
+                "pour convertir le fichier, sans jamais l'ouvrir devant l'assemblée."
+              );
+              return;
+            }
+            setConverting(filename);
+            try {
+              sourceForImport = await invoke<string>('convert_office_to_pdf', { sourcePath: file });
+            } finally {
+              setConverting(null);
+            }
+          }
+
+          const httpUrl: string = await invoke('import_media', { sourcePath: sourceForImport });
           const newItem = { id: Date.now().toString(), title: filename, number: '📄', lyrics: httpUrl, type: 'document' };
           setPlaylist([...playlist, newItem]);
         }
-    } catch(e) { console.error('addFileItem error:', e); alert('Erreur: ' + e); }
+    } catch(e) {
+      console.error('addFileItem error:', e);
+      setConverting(null);
+      setOfficeNotice('La conversion a échoué : ' + e);
+    }
   };
 
   const addAudioItem = async () => {
@@ -524,20 +564,51 @@ Texte en **gras**, en *italique*, et une liste :
     });
   };
 
+  // Mémorise qu'on a déjà prévenu pour le lien en cours de saisie : un site
+  // injoignable n'est pas forcément une erreur (réseau coupé au moment de la
+  // préparation), l'opérateur doit pouvoir insister.
+  const promptForced = useRef(false);
+
   const addLinkItem = () => {
+    promptForced.current = false;
     setPromptValue('');
     setPromptError(null);
     setPromptDialog({
       title: 'Ajouter un lien web',
       placeholder: 'https://exemple.org',
-      hint: "Certains sites refusent d'être affichés dans une autre page ; dans ce cas l'écran restera vide.",
-      onSubmit: (value) => {
+      hint: "L'adresse est vérifiée à l'ajout : beaucoup de sites refusent d'être affichés dans une autre application.",
+      onSubmit: async (value) => {
         let url = value.trim();
         if (!url) return;
         // Sans schéma, l'iframe interprète l'adresse comme un chemin local et
         // n'affiche rien.
         if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
-        const newItem = { id: Date.now().toString(), title: url, number: '🌐', lyrics: url, type: 'link' };
+
+        // On interroge le site MAINTENANT. Découvrir en plein culte qu'un lien
+        // s'affiche en blanc est le pire moment possible : mesuré, Google,
+        // GitHub et jw.org refusent tous le cadre.
+        let embeddable = true;
+        let reason = '';
+        try {
+          setPromptError('Vérification du site…');
+          const check: any = await invoke('check_embeddable', { url });
+          embeddable = !!check.embeddable;
+          reason = check.reason || '';
+          if (!check.reachable) {
+            setPromptError(`${reason} Ajouter quand même ?`);
+            // Deuxième appui = l'opérateur insiste, on ajoute.
+            if (!promptForced.current) { promptForced.current = true; return; }
+          }
+        } catch {
+          // La vérification est un confort : si elle échoue, on n'empêche pas
+          // d'ajouter le lien.
+        }
+        promptForced.current = false;
+
+        const newItem = {
+          id: Date.now().toString(), title: url, number: '🌐', lyrics: url,
+          type: 'link', embeddable, embedReason: reason,
+        };
         setPlaylist([...playlist, newItem]);
         setPromptDialog(null);
       },
@@ -557,8 +628,13 @@ Texte en **gras**, en *italique*, et une liste :
     e.nativeEvent.stopImmediatePropagation(); // Extra safety
     const item = playlist[index];
     
+    const sharedWithOther = playlist.some(
+      (other: any, i: number) => i !== index && other?.lyrics === item?.lyrics
+    );
     const confirmMessage = ['image', 'video', 'audio', 'document'].includes(item.type)
-      ? `Supprimer "${item.title}" ?\n\nLe fichier stocké sera supprimé définitivement.`
+      ? (sharedWithOther
+          ? `Supprimer "${item.title}" de l'agenda ?\n\nLe fichier est encore utilisé par un autre élément : il sera conservé.`
+          : `Supprimer "${item.title}" ?\n\nLe fichier stocké sera supprimé définitivement.`)
       : `Supprimer "${item.title}" de l'agenda ?`;
 
     // Use custom React dialog instead of window.confirm() which doesn't work in Tauri/WebKit
@@ -577,8 +653,17 @@ Texte en **gras**, en *italique*, et une liste :
               const stripped = lyricsPath.startsWith('/') ? lyricsPath.slice(1) : lyricsPath;
               absolutePath = `${appDataPath}/${stripped}`;
             }
+            // ⚠ Le même fichier peut être utilisé par PLUSIEURS éléments :
+            // un cantique projeté deux fois dans le culte, un document ajouté
+            // à nouveau. Le supprimer parce qu'on retire l'un d'eux casserait
+            // silencieusement les autres — on ne touche au disque que si plus
+            // personne ne s'en sert.
+            const stillUsed = playlist.some(
+              (other: any, i: number) => i !== index && other?.lyrics === lyricsPath
+            );
             // Only delete if it's a local file (not a URL or youtube)
-            if (!lyricsPath.startsWith('http') && !lyricsPath.startsWith('blob:') && !lyricsPath.startsWith('data:')) {
+            if (!stillUsed
+                && !lyricsPath.startsWith('http') && !lyricsPath.startsWith('blob:') && !lyricsPath.startsWith('data:')) {
               // ATTENTION : Tauri v2 attend les paramètres en camelCase.
               // Avec `file_path`, l'appel échouait à chaque fois et le fichier
               // restait sur le disque — l'erreur était avalée par un warning.
@@ -711,6 +796,27 @@ Texte en **gras**, en *italique*, et une liste :
            </div>
         </div>
       <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+        {/* Conversion d'un document bureautique : elle dure plusieurs secondes,
+            il faut donc qu'elle se voie, sinon on croit que rien ne se passe. */}
+        {converting && (
+          <div className="mb-2 flex items-center gap-2 rounded border border-[#5865f2]/40 bg-[#5865f2]/10 px-2 py-1.5">
+            <FileText size={12} className="shrink-0 animate-pulse text-[#8891f2]" />
+            <span className="truncate text-[10px] text-gray-300">
+              Conversion de <span className="font-bold">{converting}</span>…
+            </span>
+          </div>
+        )}
+        {officeNotice && (
+          <div className="mb-2 rounded border border-amber-500/40 bg-amber-950/60 p-2">
+            <p className="text-[10px] leading-relaxed text-amber-200">{officeNotice}</p>
+            <button
+              className="mt-1.5 rounded bg-amber-500 px-2 py-0.5 text-[9px] font-black text-amber-950"
+              onClick={() => setOfficeNotice(null)}
+            >
+              COMPRIS
+            </button>
+          </div>
+        )}
         {playlist.length === 0 ? <div className="text-xs text-gray-500 text-center mt-4">Agenda vide</div> : playlist.map((item: any, idx: number) => (
           <div 
             key={item.id} 

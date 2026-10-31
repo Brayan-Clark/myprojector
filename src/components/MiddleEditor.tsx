@@ -85,15 +85,20 @@ export function MiddleEditor({
       const fromDatabase =
         typeof activeSong.book === 'string' && activeSong.book.trim() !== '';
 
-      if (fromDatabase) {
-        // Un verset n'a pas de numéro exploitable ("Chap" ou une référence) ;
-        // un cantique, si. C'est ce qui distingue une bible d'un recueil.
-        const isBible = activeSong.number === "Chap" || isNaN(Number(activeSong.number));
-        const dbName = isBible ? `${activeSong.book}.SQLite3` : `${activeSong.book}.db`;
+      // La Bible n'est jamais réécrite : un module MyBible est une référence
+      // partagée, et le backend refuse l'écriture de toute façon.
+      //
+      // L'ancien test — « le numéro n'est pas un nombre » — se trompait sur
+      // TOUS les chapitres : « Genesisy 1 » a pour numéro "1". On construisait
+      // donc le chemin d'un recueil, d'où « Database not found at
+      // data/hymnes/Genesisy.db ». Le type vient maintenant du backend.
+      const isBible = activeSong.type === 'bible' || !!activeSong.version;
 
+      if (fromDatabase && !isBible) {
         await invoke("update_song", {
-          dbName,
-          isBible,
+          // `book` porte le nom du fichier SQLite pour un recueil.
+          dbName: `${activeSong.book}.db`,
+          isBible: false,
           id: typeof activeSong.id === 'string' ? parseInt(activeSong.id) : activeSong.id,
           title: localTitle,
           content: localContent
