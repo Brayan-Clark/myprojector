@@ -1184,6 +1184,143 @@ async fn convert_office_to_pdf(
     .map_err(|e| e.to_string())?
 }
 
+// ---------------------------------------------------------------------------
+// Vidéos intégrées à un .pptx
+//
+// La conversion en PDF donne la mise en page fidèle, mais le PDF est figé :
+// une vidéo intégrée y devient une image morte. Or un .pptx est une archive
+// ZIP : les médias sont dans `ppt/media/`, et `ppt/slides/_rels/slideN.xml.rels`
+// dit quelle diapo référence quel fichier.
+//
+// On extrait donc les vidéos et on les relie à leur numéro de diapo — qui est
+// aussi le numéro de page du PDF. L'opérateur peut alors lancer la vidéo de la
+// diapo affichée.
+//
+// Limite assumée : les ANIMATIONS et transitions internes au PowerPoint restent
+// perdues. On récupère la vidéo, pas le diaporama.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+pub struct SlideVideo {
+    /// Numéro de diapo, donc de page dans le PDF converti (1 = première).
+    pub slide: u32,
+    /// Chemin du fichier extrait, servi ensuite par le serveur média.
+    pub path: String,
+    pub name: String,
+}
+
+#[tauri::command]
+async fn extract_pptx_videos(
+    app_handle: tauri::AppHandle,
+    source_path: String,
+) -> Result<Vec<SlideVideo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let file = fs::File::open(&source_path).map_err(|e| format!("Lecture impossible : {e}"))?;
+        let mut archive =
+            zip::ZipArchive::new(file).map_err(|e| format!("Ce fichier n'est pas un .pptx : {e}"))?;
+
+        // 1) Quelle diapo référence quel média ? On lit les fichiers de
+        //    relations, un par diapo.
+        let mut wanted: Vec<(u32, String)> = Vec::new();
+        // `file_names()` renvoie des Result dans cette version du crate.
+        let rels: Vec<String> = archive
+            .file_names()
+            .filter_map(|n| n.ok())
+            .map(|n| n.to_string())
+            .filter(|n| n.starts_with("ppt/slides/_rels/") && n.ends_with(".xml.rels"))
+            .collect();
+
+        for rel_name in rels {
+            let slide_no: u32 = rel_name
+                .trim_start_matches("ppt/slides/_rels/slide")
+                .trim_end_matches(".xml.rels")
+                .parse()
+                .unwrap_or(0);
+            if slide_no == 0 {
+                continue;
+            }
+            let mut content = String::new();
+            {
+                use std::io::Read;
+                let mut f = archive.by_name(&rel_name).map_err(|e| e.to_string())?;
+                f.read_to_string(&mut content).map_err(|e| e.to_string())?;
+            }
+            // Un `Relationship` de type vidéo/média porte une cible
+            // « ../media/videoN.mp4 ». On reste volontairement sur une
+            // recherche textuelle : le XML est simple et stable, et une
+            // dépendance de plus pour l'analyser ne se justifie pas.
+            for part in content.split("<Relationship").skip(1) {
+                let is_media = part.contains("/video") || part.contains("/media");
+                if !is_media {
+                    continue;
+                }
+                if let Some(start) = part.find("Target=\"") {
+                    let rest = &part[start + 8..];
+                    if let Some(end) = rest.find('"') {
+                        let target = &rest[..end];
+                        // On ignore les cibles externes (liens YouTube, etc.).
+                        if target.starts_with("http") {
+                            continue;
+                        }
+                        let normalised =
+                            format!("ppt/{}", target.trim_start_matches("../"));
+                        if VIDEO_IN_PPTX
+                            .iter()
+                            .any(|ext| normalised.to_lowercase().ends_with(ext))
+                        {
+                            wanted.push((slide_no, normalised));
+                        }
+                    }
+                }
+            }
+        }
+
+        if wanted.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 2) Extraction dans le dossier média de l'application.
+        let mut out_dir = get_data_root(&app_handle)?;
+        out_dir.push("media");
+        fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+
+        let stem: String = std::path::Path::new(&source_path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "presentation".into())
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+
+        let mut found = Vec::new();
+        for (slide, inner) in wanted {
+            let base = inner.rsplit('/').next().unwrap_or("video").to_string();
+            let dest = out_dir.join(format!("{stem}-diapo{slide}-{base}"));
+
+            if !dest.exists() {
+                use std::io::copy;
+                let mut entry = match archive.by_name(&inner) {
+                    Ok(e) => e,
+                    Err(_) => continue, // référence cassée : on passe
+                };
+                let mut out = fs::File::create(&dest).map_err(|e| e.to_string())?;
+                copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+            }
+            found.push(SlideVideo {
+                slide,
+                path: dest.to_string_lossy().to_string(),
+                name: base,
+            });
+        }
+        found.sort_by_key(|v| v.slide);
+        Ok(found)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+const VIDEO_IN_PPTX: [&str; 6] = [".mp4", ".m4v", ".mov", ".avi", ".wmv", ".webm"];
+
 #[tauri::command]
 fn update_song(
     app_handle: tauri::AppHandle,
@@ -3094,6 +3231,7 @@ pub fn run() {
             prime_live_webview,
             office_status,
             convert_office_to_pdf,
+            extract_pptx_videos,
             update_song,
             list_dbs,
             download_db,

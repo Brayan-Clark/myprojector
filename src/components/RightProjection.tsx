@@ -21,7 +21,7 @@ export function RightProjection({
   setIsBaseScreenProjected, ticker, clock, isContentHidden, isCameraActive, selectedCamera, currentTime,
   overlayColor,
   projectedPdfPage, commandProjectedPage, projectedNumPages, setProjectedNumPages,
-  width, bgFilters, header, transition, parallels, parallelStyle, onShrinkText, slideSplit
+  width, bgFilters, header, transition, parallels, parallelStyle, onShrinkText, slideSplit, onPlaySlideVideo
 }: any) {
   const isProjectedPdf = projectedSong?.type === 'document' && /\.pdf(\?.*)?$/i.test(projectedSong?.lyrics || "");
 
@@ -87,6 +87,14 @@ export function RightProjection({
   useEffect(() => {
     localStorage.setItem('showNextSlide', showNext ? '1' : '0');
   }, [showNext]);
+
+  // Vidéo rattachée à la page actuellement projetée, s'il y en a une.
+  // Le numéro de diapo du .pptx correspond au numéro de page du PDF converti.
+  const slideVideoHere = useMemo(() => {
+    const list = projectedSong?.slideVideos;
+    if (!Array.isArray(list) || list.length === 0) return null;
+    return list.find((v: any) => v.slide === (projectedPdfPage || 1)) || null;
+  }, [projectedSong?.slideVideos, projectedPdfPage]);
 
   const previewVideoRef = useRef<HTMLVideoElement>(null);
   // Mémoïsé : `getSlides` renvoyait un TABLEAU NEUF à chaque rendu, et ce
@@ -664,6 +672,20 @@ export function RightProjection({
                   Entrée pour aller à cette diapo
                </div>
             </div>
+         )}
+
+         {/* Vidéo intégrée à la diapo affichée (présentation PowerPoint).
+             Le PDF ne peut pas la jouer : on la propose à l'opérateur, qui la
+             lance quand il arrive dessus. Le bouton est de SON côté — on ne
+             déclenche jamais une vidéo tout seul devant l'assemblée. */}
+         {!isBaseScreenProjected && slideVideoHere && (
+            <button
+               className="absolute bottom-2 left-2 z-[70] flex items-center gap-1.5 rounded border border-[#5865f2] bg-[#5865f2]/90 px-2 py-1 text-[9px] font-black text-white shadow-lg transition hover:bg-[#5865f2]"
+               title={`Projeter la vidéo intégrée à cette diapo (${slideVideoHere.name})`}
+               onClick={() => onPlaySlideVideo?.(slideVideoHere)}
+            >
+               <Film size={11} /> LANCER LA VIDÉO
+            </button>
          )}
 
          {/* LIVE indicator */}

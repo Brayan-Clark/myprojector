@@ -476,6 +476,7 @@ Texte en **gras**, en *italique*, et une liste :
           // PDF. La conversion prend plusieurs secondes — on la fait ICI, à la
           // préparation, jamais pendant la projection.
           let sourceForImport = file;
+          let slideVideos: any[] = [];
           if (/\.(docx?|pptx?|odt|odp|ods|xlsx?|rtf)$/i.test(file)) {
             const office: any = await invoke('office_status');
             if (!office?.available) {
@@ -489,13 +490,36 @@ Texte en **gras**, en *italique*, et une liste :
             setConverting(filename);
             try {
               sourceForImport = await invoke<string>('convert_office_to_pdf', { sourcePath: file });
+              // Le PDF est figé : une vidéo intégrée y devient une image morte.
+              // On va donc la rechercher dans l'archive et on la rattache à sa
+              // diapo, qui est aussi sa page dans le PDF.
+              if (/\.pptx?$/i.test(file)) {
+                try {
+                  slideVideos = await invoke<any[]>('extract_pptx_videos', { sourcePath: file });
+                } catch (e) {
+                  console.warn('Vidéos du pptx non extraites:', e);
+                }
+              }
             } finally {
               setConverting(null);
             }
           }
 
           const httpUrl: string = await invoke('import_media', { sourcePath: sourceForImport });
-          const newItem = { id: Date.now().toString(), title: filename, number: '📄', lyrics: httpUrl, type: 'document' };
+          const newItem: any = {
+            id: Date.now().toString(), title: filename, number: '📄',
+            lyrics: httpUrl, type: 'document',
+          };
+          if (slideVideos.length > 0) {
+            // Rattachées à l'élément : l'opérateur verra, sur la page
+            // concernée, qu'une vidéo est disponible.
+            newItem.slideVideos = slideVideos;
+            setOfficeNotice(
+              `${slideVideos.length} vidéo${slideVideos.length > 1 ? 's' : ''} récupérée${slideVideos.length > 1 ? 's' : ''} ` +
+              `dans cette présentation. Elle${slideVideos.length > 1 ? 's' : ''} se lance${slideVideos.length > 1 ? 'nt' : ''} ` +
+              `depuis la page correspondante, pendant la projection.`
+            );
+          }
           setPlaylist([...playlist, newItem]);
         }
     } catch(e) {

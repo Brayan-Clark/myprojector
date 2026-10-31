@@ -1228,6 +1228,16 @@ function App() {
           parallels={parallelVerses}
           parallelStyle={liveParallel}
           onShrinkText={(size: number) => handleUpdateTextSettings({ ...tbTextSettings, fontSize: size })}
+          onPlaySlideVideo={(v: any) => {
+            // La vidéo devient le contenu projeté, comme n'importe quel média.
+            // Revenir à la présentation se fait en reprojetant le document.
+            setProjectedSong({
+              id: `slide-video-${v.slide}`, title: v.name, number: '🎬',
+              lyrics: v.path, type: 'video',
+            });
+            setProjectedVerseIdx(0);
+            setIsBaseScreenProjected(false);
+          }}
           mediaOverlay={null}
           isContentHidden={isContentHidden}
           isCameraActive={isCameraActive}
