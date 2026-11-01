@@ -84,6 +84,11 @@ jobs:
 
       - run: npm ci
 
+      # Les tests tournent AVANT la construction, et bloquent la publication.
+      # Une version signée et distribuée aux postes est beaucoup plus coûteuse
+      # à rattraper qu'une construction qui échoue ici.
+      - run: npm test
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -98,7 +103,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "MyProjector ${{ github.ref_name }}"
-          releaseBody: "Voir les modifications ci-dessous. Téléchargez le fichier correspondant à votre système."
+          releaseBody: "Les modifications de cette version sont décrites dans [CHANGELOG.md](https://github.com/Brayan-Clark/myprojector/blob/main/CHANGELOG.md). Téléchargez le fichier correspondant à votre système."
           # Brouillon : les trois plateformes déposent leurs fichiers, puis
           # c'est vous qui publiez. Tant que la release est en brouillon, aucun
           # utilisateur ne reçoit la notification de mise à jour.

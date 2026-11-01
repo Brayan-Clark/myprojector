@@ -9,6 +9,7 @@ import {
 import { useLibraryDownloads } from "./useLibrary";
 import { fileExtension, isProjectableDocument, openWithSystem } from "../../lib/openExternal";
 import { Card, EmptyState, ErrorBox, InstallButton, OfflineNotice, Spinner } from "./ui";
+import { newItemId } from "../../lib/items";
 
 /** Les 179 PDF du dépôt : téléchargement à la carte, puis projection. */
 export function DocsSection({ search, onAddToPlaylist }: {
@@ -118,7 +119,7 @@ export function DocsSection({ search, onAddToPlaylist }: {
       : await download(doc.id, doc.url, filename);
     if (!path) return;
     onAddToPlaylist({
-      id: `${Date.now()}`,
+      id: newItemId(),
       title: doc.title,
       number: "📄",
       lyrics: path,

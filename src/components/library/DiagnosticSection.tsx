@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle, Check, Copy, RefreshCw, XCircle } from "lucide-react";
 import { ErrorBox, Spinner } from "./ui";
+import { RenderModeCard } from "./RenderModeCard";
 
 interface DiagCheck {
   id: string; label: string;
@@ -71,6 +72,10 @@ export function DiagnosticSection() {
           <RefreshCw size={15} />
         </button>
       </div>
+
+      {/* Placé avant la liste : c'est le réglage qui décide de la fluidité de
+          la projection, et donc le premier à vérifier sur un poste neuf. */}
+      <RenderModeCard />
 
       <div className="space-y-2">
         {checks.map((c) => {

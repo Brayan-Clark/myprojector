@@ -9,6 +9,7 @@ import { RightProjection } from './components/RightProjection';
 import { LiveView } from './components/LiveView';
 import { StageView } from './components/StageView';
 import { UpdateBanner } from './components/UpdateBanner';
+import { AlertCircle, X } from 'lucide-react';
 import { ResizeHandle } from './components/ResizeHandle';
 import { PANES, usePaneSize } from './lib/panes';
 import { DEFAULT_BG_FILTERS } from './lib/bgStyle';
@@ -17,6 +18,11 @@ import { DEFAULT_PARALLEL, withParallelDefaults } from './lib/parallel';
 import { DEFAULT_HEADER, buildHeaderText } from './lib/header';
 import { DEFAULT_ANNOUNCEMENTS, announcementSlides, withAnnouncementDefaults } from './lib/announcements';
 import { DEFAULT_STAGE, withStageDefaults } from './lib/stage';
+import { isBibleChapter, type PlaylistItem, type SongItem } from './lib/items';
+import { preloadHeavyViews } from './components/lazy';
+import {
+  clearResumePoint, describeAge, readResumePoint, saveResumePoint, type ResumePoint,
+} from './lib/resume';
 
 /**
  * Catégorie de réglages d'un élément, déduite de L'ÉLÉMENT — jamais de
@@ -32,14 +38,39 @@ import { DEFAULT_STAGE, withStageDefaults } from './lib/stage';
  * déplacer dans leur propre catégorie changerait l'apparence déjà réglée
  * chez les utilisateurs.
  */
-const categoryOf = (item: any): string => (item?.type === 'bible' ? 'bible' : 'hymnes');
+const categoryOf = (item: any): string => (isBibleChapter(item) ? 'bible' : 'hymnes');
+
+/**
+ * Agenda de la séance précédente.
+ *
+ * ⚠ Le contenu de `localStorage` n'est PAS digne de confiance : il survit aux
+ * mises à jour, et une version antérieure a pu y ranger une autre forme. Un
+ * JSON illisible faisait lever l'initialiseur de `useState`, donc l'application
+ * entière ne démarrait plus — et l'opérateur n'avait aucun moyen de s'en
+ * sortir sans vider le stockage à la main. On repart d'un agenda vide, ce qui
+ * est désagréable mais réparable.
+ */
+function readSavedPlaylist(): PlaylistItem[] {
+  try {
+    const saved = localStorage.getItem('currentPlaylist');
+    if (!saved) return [];
+    const parsed = JSON.parse(saved);
+    if (!Array.isArray(parsed)) return [];
+    // On ne garde que ce qui a de quoi être projeté : un élément sans
+    // identifiant casserait les clés React, un élément sans `lyrics` donnerait
+    // une diapo vide sans qu'on sache pourquoi.
+    return parsed.filter(
+      (i) => i && typeof i.id === 'string' && typeof i.lyrics === 'string'
+    ) as PlaylistItem[];
+  } catch (e) {
+    console.warn("Agenda précédent illisible, on repart à vide", e);
+    return [];
+  }
+}
 
 function App() {
-  const [songs, setSongs] = useState<any[]>([]);
-  const [playlist, setPlaylist] = useState<any[]>(() => {
-    const saved = localStorage.getItem('currentPlaylist');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [songs, setSongs] = useState<SongItem[]>([]);
+  const [playlist, setPlaylist] = useState<PlaylistItem[]>(() => readSavedPlaylist());
   const [activeSong, setActiveSong] = useState<any>(null);
   const [activeVerseIdx, setActiveVerseIdx] = useState<number>(-1);
   const [projectedSong, setProjectedSong] = useState<any>(null);
@@ -154,6 +185,11 @@ function App() {
     invoke<number>('media_server_port').then(port => {
       localStorage.setItem('mediaPort', String(port));
     }).catch(console.error);
+
+    // Les visionneuses Markdown et PDF sont chargées maintenant, pendant que
+    // l'opérateur prépare sa séance — et non au moment de projeter, où une
+    // attente serait visible par l'assemblée. Voir `components/lazy.tsx`.
+    preloadHeavyViews();
   }, []);
 
   useEffect(() => {
@@ -164,8 +200,100 @@ function App() {
     localStorage.setItem('currentPlaylist', JSON.stringify(playlist));
   }, [playlist]);
 
+  /**
+   * Position de projection, conservée en continu.
+   *
+   * L'agenda était déjà enregistré, mais pas l'endroit où on en était : après
+   * un plantage ou une coupure de courant en plein culte, l'opérateur
+   * retrouvait sa liste et devait recompter les strophes devant l'assemblée.
+   *
+   * On n'enregistre que ce qui est RÉELLEMENT projeté — pas la sélection en
+   * cours dans la barre latérale, qui change à chaque flèche du clavier et ne
+   * dit rien de ce que la salle voit. L'écran de base efface la position : on
+   * ne proposera pas de reprendre un chant qu'on avait justement fini de
+   * projeter.
+   */
+  useEffect(() => {
+    if (isBaseScreenProjected || !projectedSong?.id || projectedVerseIdx < 0) {
+      clearResumePoint();
+      return;
+    }
+    saveResumePoint({
+      itemId: String(projectedSong.id),
+      title: String(projectedSong.title || ''),
+      slideIndex: projectedVerseIdx,
+      pdfPage: projectedPdfPage,
+    });
+  }, [projectedSong?.id, projectedSong?.title, projectedVerseIdx, projectedPdfPage, isBaseScreenProjected]);
+
+  /**
+   * Proposition de reprise, calculée une seule fois au démarrage.
+   *
+   * ⚠ On ne reprojette pas tout seul : rétablir l'affichage enverrait du
+   * contenu sur l'écran de la salle sans que personne ne l'ait demandé.
+   */
+  const [resumePoint, setResumePoint] = useState<ResumePoint | null>(null);
+  useEffect(() => {
+    setResumePoint(readResumePoint(playlist.map((i) => i.id)));
+    // Volontairement sans dépendances : la proposition porte sur l'état
+    // retrouvé au lancement. La recalculer à chaque modification de l'agenda
+    // la ferait réapparaître en pleine préparation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const applyResume = () => {
+    if (!resumePoint) return;
+    const item = playlist.find((i) => i.id === resumePoint.itemId);
+    setResumePoint(null);
+    if (!item) return;
+    // On rouvre l'élément et on se place à la bonne diapo, SANS projeter :
+    // l'opérateur garde la main sur ce qui part à l'écran.
+    setActiveSong(item);
+    setActiveCategory(categoryOf(item));
+    setActiveVerseIdx(resumePoint.slideIndex);
+  };
+
   const isLiveMode = useMemo(() => new URLSearchParams(window.location.search).get('live') === 'true', []);
   const isStageMode = useMemo(() => new URLSearchParams(window.location.search).get('stage') === 'true', []);
+
+  /**
+   * Confirme au backend que le rendu fonctionne.
+   *
+   * ⚠ On compte de vraies IMAGES, pas le montage de React.
+   *
+   * Sur une fenêtre noire (chemin DMA-BUF en échec), le JavaScript s'exécute
+   * normalement : confirmer au montage viderait le filet de sécurité de tout
+   * son sens. En revanche `requestAnimationFrame` est cadencé par le
+   * compositeur — si rien n'est composé, les rappels ne viennent pas, on ne
+   * confirme pas, et le démarrage suivant redescend d'un cran
+   * (voir `resolve_render_mode` dans src-tauri/src/lib.rs).
+   *
+   * Dix images, soit environ un sixième de seconde à 60 Hz : assez pour que
+   * l'usage normal confirme toujours, assez court pour qu'une fermeture
+   * immédiate ne déclenche pas de faux repli.
+   *
+   * Déclaré AVANT les retours anticipés `isLiveMode` / `isStageMode` — l'ordre
+   * des hooks doit rester stable — mais ne fait rien dans ces fenêtres : c'est
+   * celle de contrôle qui porte le réglage.
+   */
+  useEffect(() => {
+    if (isLiveMode || isStageMode) return;
+    let frames = 0;
+    let handle = 0;
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) return;
+      if (++frames >= 10) {
+        invoke('confirm_render_ok').catch((e) =>
+          console.warn('Confirmation du rendu impossible', e)
+        );
+        return;
+      }
+      handle = requestAnimationFrame(tick);
+    };
+    handle = requestAnimationFrame(tick);
+    return () => { cancelled = true; cancelAnimationFrame(handle); };
+  }, [isLiveMode, isStageMode]);
 
   if (isLiveMode) {
     return <LiveView />;
@@ -1056,6 +1184,32 @@ function App() {
       {/* Uniquement dans la fenêtre de contrôle : `isLiveMode` a déjà renvoyé
           la vue de projection plus haut, qui ne doit rien afficher de tel. */}
       <UpdateBanner />
+
+      {/* Reprise après incident. Discrète et refermable : si l'application
+          s'est arrêtée hier, cette barre ne doit pas gêner la préparation
+          d'aujourd'hui. */}
+      {resumePoint && (
+        <div className="flex shrink-0 items-center gap-3 border-b border-amber-500/25 bg-amber-500/[0.08] px-4 py-2">
+          <AlertCircle size={14} className="shrink-0 text-amber-400" />
+          <p className="min-w-0 flex-1 truncate text-xs text-amber-100">
+            La séance s'est arrêtée {describeAge(resumePoint.savedAt)} sur
+            {' '}« {resumePoint.title} », diapo {resumePoint.slideIndex + 1}.
+          </p>
+          <button
+            onClick={applyResume}
+            className="shrink-0 rounded-md bg-amber-500 px-3 py-1 text-[11px] font-bold text-black transition hover:bg-amber-400"
+          >
+            Reprendre ici
+          </button>
+          <button
+            onClick={() => { setResumePoint(null); clearResumePoint(); }}
+            title="Ignorer"
+            className="shrink-0 rounded-full p-1 text-amber-300/70 transition hover:bg-white/10 hover:text-white"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
       <Toolbar
         setBgImage={handleUpdateBgImage}
         bgImage={tbBgImage}

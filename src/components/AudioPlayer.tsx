@@ -88,11 +88,28 @@ export function AudioPlayer({ song }: { song: any }) {
       }, 4000);
     });
 
+  /**
+   * Le panneau est-il ouvert ?
+   *
+   * `timeupdate` est émis quatre fois par seconde : y attacher un `setState`
+   * faisait donc re-rendre ce composant quatre fois par seconde pendant toute
+   * la durée d'un cantique, y compris quand la barre de progression n'est pas
+   * à l'écran. Sur un processeur à deux coeurs qui décode déjà une vidéo de
+   * fond, ce travail inutile se paie en saccades. On ne suit la position que
+   * lorsque quelqu'un la regarde.
+   */
+  const openRef = useRef(false);
+  useEffect(() => {
+    openRef.current = open;
+    // À la réouverture, on resynchronise : la position a avancé sans nous.
+    if (open && audioRef.current) setTime(audioRef.current.currentTime);
+  }, [open]);
+
   // --- élément audio unique -------------------------------------------------
   useEffect(() => {
     const el = new Audio();
     el.preload = "none";
-    const onTime = () => setTime(el.currentTime);
+    const onTime = () => { if (openRef.current) setTime(el.currentTime); };
     const onMeta = () => setDuration(el.duration || 0);
     const onEnd = () => setStatus(el.loop ? "playing" : "idle");
     const onErr = () => {
@@ -191,15 +208,14 @@ export function AudioPlayer({ song }: { song: any }) {
       setMessage("Audio introuvable — télécharge-le pour l'utiliser hors ligne.");
       return null;
     }
-    try {
-      const { cacheRemoteAudio } = await import("../lib/library");
-      const local = await cacheRemoteAudio(url, `${track.collection}-${track.filename}`);
-      setIsOffline(false);
-      return local;
-    } catch (e) {
-      setMessage(`Lecture en ligne impossible : ${e instanceof Error ? e.message : String(e)}`);
-      return null;
-    }
+    // Relais local par tranches : la lecture démarre tout de suite au lieu
+    // d'attendre le téléchargement complet de la piste (voir `relay_audio`).
+    // Pour une utilisation pendant le culte, le bouton « Télécharger pour le
+    // hors ligne » reste la bonne réponse — c'est lui qui garantit l'absence
+    // de coupure, pas la mise en cache implicite d'une écoute.
+    const { audioRelayUrl } = await import("../lib/media");
+    setIsOffline(false);
+    return audioRelayUrl(url);
   };
 
   const toggle = async () => {

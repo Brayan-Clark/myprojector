@@ -2,12 +2,13 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import { FileText, Plus, Save, Edit3, Eye, AlertCircle } from 'lucide-react';
 import { MarkdownToolbar, handleMarkdownShortcut } from './MarkdownToolbar';
 import { AudioPlayer } from './AudioPlayer';
-import { MarkdownView } from './MarkdownView';
+import { MarkdownView } from './lazy';
 import { getSlides } from '../lib/slides';
+import { isBibleChapter, isFromDatabase } from '../lib/items';
 import { fileExtension, isProjectableDocument, openWithSystem } from '../lib/openExternal';
 import { invoke } from '@tauri-apps/api/core';
 import { cleanUrl } from '../lib/media';
-import { PdfViewer } from './PdfViewer';
+import { PdfViewer } from './lazy';
 export function MiddleEditor({
   activeSong, onSave, pdfWidth, setPdfWidth, pdfHeight, setPdfHeight, onProjectPage
 }: {
@@ -81,9 +82,9 @@ export function MiddleEditor({
       // Avant, on excluait une LISTE de types ('custom', 'image', 'video',
       // 'document'). Chaque nouveau type d'agenda — markdown, texte du
       // Mofon'aina, audio, YouTube, lien — passait au travers et tentait
-      // d'écrire dans "undefined.SQLite3".
-      const fromDatabase =
-        typeof activeSong.book === 'string' && activeSong.book.trim() !== '';
+      // d'écrire dans "undefined.SQLite3". La règle vit dans `lib/items.ts`,
+      // où elle est testée contre les onze natures existantes.
+      const fromDatabase = isFromDatabase(activeSong);
 
       // La Bible n'est jamais réécrite : un module MyBible est une référence
       // partagée, et le backend refuse l'écriture de toute façon.
@@ -92,7 +93,7 @@ export function MiddleEditor({
       // TOUS les chapitres : « Genesisy 1 » a pour numéro "1". On construisait
       // donc le chemin d'un recueil, d'où « Database not found at
       // data/hymnes/Genesisy.db ». Le type vient maintenant du backend.
-      const isBible = activeSong.type === 'bible' || !!activeSong.version;
+      const isBible = isBibleChapter(activeSong);
 
       if (fromDatabase && !isBible) {
         await invoke("update_song", {

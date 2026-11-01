@@ -4,10 +4,10 @@ import { FileText, ChevronLeft, ChevronRight } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { cleanUrl } from "../lib/media";
-import { PdfViewer, type PdfViewerHandle } from "./PdfViewer";
+import { PdfViewer, type PdfViewerHandle } from "./lazy";
 import { BackgroundVideo } from "./BackgroundVideo";
 import { ProjectedVideo } from "./ProjectedVideo";
-import { MarkdownView } from "./MarkdownView";
+import { MarkdownView } from "./lazy";
 import {
   bgMediaStyle, veilStyle, withBgDefaults, textShadowCss,
   DEFAULT_BG_FILTERS, type BgFilters,

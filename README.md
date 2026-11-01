@@ -17,6 +17,8 @@ Quatre documents, à lire selon le besoin :
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Comprendre comment l'application est faite, où vivent les données, pourquoi certains choix bizarres sont volontaires |
 | [docs/RELEASE.md](docs/RELEASE.md) | Publier une nouvelle version, gérer les clés de signature et la mise à jour automatique |
 | [docs/BIBLIOTHEQUE.md](docs/BIBLIOTHEQUE.md) | Ajouter ou corriger des contenus téléchargeables (documents, audio, Mofon'aina) |
+| [CHANGELOG.md](CHANGELOG.md) | Savoir ce qui a changé d'une version à l'autre |
+| [docs/CULTE.md](docs/CULTE.md) | Toucher à l'agenda, au format de culte enregistré, aux déroulés ou à la préparation du sabbat |
 | [docs/DEPANNAGE.md](docs/DEPANNAGE.md) | Quelque chose ne marche pas sur une machine d'utilisateur |
 
 ---
@@ -87,6 +89,19 @@ lit**. Voir [docs/DEPANNAGE.md](docs/DEPANNAGE.md).
 npm install
 npm run tauri dev
 ```
+
+### Tester
+
+```bash
+npm test                 # une fois
+npm run test:watch       # en continu pendant le développement
+```
+
+Les tests portent sur les modules purs de `src/lib` — découpage des diapos,
+références bibliques, carte audio de la Bible, déroulés de culte, conversion
+des leçons. Ils tournent en CI **avant** la construction et bloquent la
+publication. Voir [docs/CULTE.md](docs/CULTE.md) § 6 pour ce qu'ils
+verrouillent et pourquoi.
 
 ### Construire localement
 

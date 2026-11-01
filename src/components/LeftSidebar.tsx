@@ -1,12 +1,30 @@
-import { useState, useEffect, useRef, useMemo, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { Save, FolderOpen, X, BookOpen, Music, Search as SearchIcon, List, Download, Plus, Trash2, ChevronUp, ChevronDown, FileText, Image as ImageIcon, Video, Type, Library as LibraryIcon, Heart, Headphones, Youtube, Globe, FileCode, Quote } from 'lucide-react';
-import { Library } from './library/Library';
+import { useState, useEffect, useRef, useMemo, lazy, Suspense, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { Save, FolderOpen, X, BookOpen, Music, Search as SearchIcon, List, Download, Plus, Trash2, ChevronUp, ChevronDown, FileText, Image as ImageIcon, Video, Type, Library as LibraryIcon, Heart, Headphones, Youtube, Globe, FileCode, Quote, Sparkles } from 'lucide-react';
 import Fuse from 'fuse.js';
 import { invoke } from '@tauri-apps/api/core';
 import { ResizeHandle } from './ResizeHandle';
 import { PANES, usePaneSize } from '../lib/panes';
 import { focusSlideList, NEXT_KEYS, PREV_KEYS } from '../lib/keys';
 import { BibleSearchResults, type BibleHit } from './BibleSearchResults';
+import { normalizeBookName, parseBibleRef, resolveBook } from '../lib/bibleRef';
+import { newItemId } from '../lib/items';
+import {
+  buildService, defaultServiceFileName, defaultServiceTitle,
+  parseService, serializeService,
+} from '../lib/service';
+import { totalMinutes, formatDuration, type ServiceTemplate } from '../lib/serviceTemplates';
+import { ServiceTemplatePicker } from './ServiceTemplatePicker';
+import { buildSabbathPlan, describeSabbath } from '../lib/sabbathPlan';
+
+/**
+ * La bibliothèque est chargée à son ouverture, pas au démarrage.
+ *
+ * Ses treize sections entraînent avec elles les catalogues distants, les
+ * cartes de langues et les grilles de fiches. Rien de tout cela ne sert
+ * pendant un culte, et l'ensemble retardait le premier affichage de
+ * l'application sur une machine lente.
+ */
+const Library = lazy(() => import('./library/Library').then((m) => ({ default: m.Library })));
 
 export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoading, onLoadDb, activeSong, searchFocusTrigger, favoriteDbs, toggleFavoriteDb, width }: any) {
   const searchRef = useRef<HTMLInputElement>(null);
@@ -37,12 +55,22 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
   const [selectedChapter, setSelectedChapter] = useState("");
   const [showAddMenu, setShowAddMenu] = useState(false);
   // Custom confirm dialog state (replaces window.confirm which doesn't work in Tauri/WebKit)
-  const [confirmDialog, setConfirmDialog] = useState<{ message: string; onConfirm: () => void } | null>(null);
+  // Le titre et le libellé sont paramétrables : la même boîte sert à
+  // supprimer un élément ET à confirmer le remplacement d'un agenda. Figée
+  // sur « Confirmer la suppression », elle annonçait une suppression là où
+  // l'opérateur ouvrait simplement un autre culte.
+  const [confirmDialog, setConfirmDialog] = useState<{
+    message: string;
+    onConfirm: () => void;
+    title?: string;
+    confirmLabel?: string;
+  } | null>(null);
   // Idem pour la saisie : window.prompt() ne fonctionne pas non plus sous
   // WebKitGTK — il renvoyait toujours null, donc l'ajout d'un lien YouTube ou
   // web ne se produisait jamais.
   const [promptDialog, setPromptDialog] = useState<{
     title: string; placeholder: string; hint?: string;
+    submitLabel?: string;
     onSubmit: (value: string) => void;
   } | null>(null);
   const [promptValue, setPromptValue] = useState('');
@@ -51,6 +79,10 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
   // montrer. Et dire clairement quoi installer si aucune suite n'est présente.
   const [converting, setConverting] = useState<string | null>(null);
   const [officeNotice, setOfficeNotice] = useState<string | null>(null);
+  // Retour visible des actions sur l'agenda (enregistrer, ouvrir, modèle).
+  // Ces actions échouaient en silence dans la console, inaccessible ici.
+  const [agendaNotice, setAgendaNotice] =
+    useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
   // Hauteur de l'agenda : un culte à trois chants et un culte à quinze
   // n'ont pas besoin de la même place. Retenue entre deux séances.
   const [agendaHeight, setAgendaHeight, resetAgendaHeight] = usePaneSize(PANES.agenda);
@@ -102,12 +134,8 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
 
   // "1Jao", "1 Jaona", "1jao." doivent tous mener au même livre : on compare
   // des formes normalisées (sans accents, sans espaces, sans ponctuation).
-  const normalize = (v: any) =>
-    String(v ?? '')
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9]/g, '');
+  // La règle vit dans `lib/bibleRef.ts`, où elle est testée.
+  const normalize = normalizeBookName;
 
   // Fuse ne trouvait pas "1Jao 3" car le titre indexé s'écrit "1 Jaona 3".
   // On indexe donc aussi une version compacte du titre et l'abréviation
@@ -231,29 +259,19 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
     // pas une référence et la résolution sautait de chapitre en chapitre à
     // chaque lettre tapée.
     if (view === 'bible' && bibleMode === 'ref' && searchTerm.trim()) {
-      // Le nom du livre peut commencer par un chiffre ET contenir une espace
-      // ("1 Jaona"), ou être collé ("1Jao"). L'ancien motif exigeait des
-      // caractères contigus, donc aucune référence en 1/2/3 ne fonctionnait.
-      const match = searchTerm.match(
-        /^\s*(\d?\s*[^\d\s.:,;]+)\s*[.\s]*(\d+)\s*[:.\s]*(\d+)?\s*-?\s*(\d+)?/i
-      );
-      if (match) {
-        const [, bookAlias, chapter, vStart, vEnd] = match;
-        const alias = normalize(bookAlias);
-        // On accepte le nom complet comme l'abréviation, dans les deux sens :
-        // "1jao" doit trouver "1 Jaona", et "1jaona" doit trouver l'abrégé "1jao".
-        const bookNameStr = alias
-          ? bibleBooks.find((b: any) => normalize(b).startsWith(alias)) ||
-            bibleBooks.find((b: any) => {
-              const song = songs.find((x: any) => x.book === b && x.abbr);
-              const abbr = normalize(song?.abbr);
-              return abbr && (abbr.startsWith(alias) || alias.startsWith(abbr));
-            })
-          : undefined;
+      // Découpage et résolution du livre : voir `lib/bibleRef.ts`, qui porte
+      // les cas tordus (noms commençant par un chiffre, abréviations) et leurs
+      // tests.
+      const ref = parseBibleRef(searchTerm);
+      if (ref) {
+        const { chapter, verseStart: vStart, verseEnd: vEnd } = ref;
+        const abbrOf = (book: string) =>
+          songs.find((x: any) => x.book === book && x.abbr)?.abbr;
+        const bookNameStr = resolveBook(ref.bookAlias, bibleBooks as string[], abbrOf);
         if (bookNameStr) {
-          if (selectedBook !== bookNameStr) setSelectedBook(bookNameStr as string);
+          if (selectedBook !== bookNameStr) setSelectedBook(bookNameStr);
           if (selectedChapter !== chapter) setSelectedChapter(chapter);
-          
+
           const chapterSong = songs.find((s:any) => s.book === bookNameStr && s.number === chapter);
           if (chapterSong && (activeSong?.id !== chapterSong.id || activeSong?.startVerse !== vStart)) {
             onSelectSong({ ...chapterSong, startVerse: vStart, endVerse: vEnd });
@@ -304,24 +322,179 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
     }
   };
 
-  const handleSaveAgenda = async () => {
-    try {
-      const { save } = await import('@tauri-apps/plugin-dialog');
-      const filePath = await save({ filters: [{ name: 'Agenda JSON', extensions: ['json'] }] });
-      if (filePath) await invoke('save_playlist_file', { path: filePath, content: JSON.stringify(playlist, null, 2) });
-    } catch (e) { console.error(e); }
+  /**
+   * Enregistre le culte.
+   *
+   * On demande son titre : un dossier de `agenda.json`, `agenda(1).json`,
+   * `agenda(2).json` ne dit pas lequel est le culte du sabbat prochain. Le
+   * titre devient aussi le nom proposé, donc répondre suffit.
+   */
+  const handleSaveAgenda = () => {
+    if (playlist.length === 0) {
+      setAgendaNotice({ kind: 'error', text: "L'agenda est vide : il n'y a rien à enregistrer." });
+      return;
+    }
+    setPromptError(null);
+    setPromptValue(defaultServiceTitle());
+    setPromptDialog({
+      title: 'Enregistrer le culte',
+      placeholder: 'Culte du sabbat…',
+      hint: `${playlist.length} élément(s). Le titre sert à le retrouver plus tard.`,
+      submitLabel: 'Enregistrer',
+      onSubmit: async (value: string) => {
+        // La boîte se referme AVANT d'ouvrir le sélecteur de fichier : les
+        // autres appelants la ferment eux-mêmes, et l'oublier laissait la
+        // saisie par-dessus la fenêtre d'enregistrement du système.
+        setPromptDialog(null);
+        try {
+          const { save } = await import('@tauri-apps/plugin-dialog');
+          const filePath = await save({
+            defaultPath: defaultServiceFileName(),
+            filters: [{ name: 'Culte MyProjector', extensions: ['json'] }],
+          });
+          if (!filePath) return;
+          const document = buildService(playlist, { title: value });
+          await invoke('save_playlist_file', {
+            path: filePath,
+            content: serializeService(document),
+          });
+          setAgendaNotice({ kind: 'ok', text: `« ${document.title} » enregistré.` });
+        } catch (e) {
+          // Un échec d'écriture (disque plein, clé USB retirée) doit se VOIR.
+          setAgendaNotice({ kind: 'error', text: `Enregistrement impossible : ${e}` });
+        }
+      },
+    });
   };
 
+  /**
+   * Ouvre un culte enregistré.
+   *
+   * Deux choses que l'ancienne version ne faisait pas :
+   *   - elle REMPLAÇAIT l'agenda en cours sans prévenir, donc un clic de trop
+   *     effaçait une préparation ;
+   *   - sur un fichier illisible, elle écrivait dans la console et rien
+   *     d'autre. « Rien ne se passe » est le pire retour possible.
+   */
   const handleLoadAgenda = async () => {
     try {
       const { open } = await import('@tauri-apps/plugin-dialog');
-      const filePath = await open({ filters: [{ name: 'Agenda JSON', extensions: ['json'] }], multiple: false });
-      if (filePath && typeof filePath === 'string') {
-        const contents: string = await invoke('read_playlist_file', { path: filePath });
-        const data = JSON.parse(contents);
-        if (Array.isArray(data)) setPlaylist(data);
+      const filePath = await open({
+        filters: [{ name: 'Culte MyProjector', extensions: ['json'] }],
+        multiple: false,
+      });
+      if (!filePath || typeof filePath !== 'string') return;
+
+      const contents: string = await invoke('read_playlist_file', { path: filePath });
+      // `parseService` lève un message explicite : on le laisse remonter.
+      const { document, origin, dropped } = parseService(contents);
+
+      const apply = () => {
+        setPlaylist(document.items);
+        const details = [
+          `${document.items.length} élément(s)`,
+          origin === 'legacy' ? 'ancien format converti' : null,
+          dropped > 0 ? `${dropped} élément(s) illisible(s) écarté(s)` : null,
+        ].filter(Boolean).join(' · ');
+        setAgendaNotice({
+          kind: dropped > 0 ? 'error' : 'ok',
+          text: `« ${document.title} » ouvert — ${details}.`,
+        });
+      };
+
+      if (playlist.length > 0) {
+        setConfirmDialog({
+          title: 'Remplacer l\'agenda en cours ?',
+          confirmLabel: 'Remplacer',
+          message:
+            `L'agenda actuel contient ${playlist.length} élément(s) et sera perdu `
+            + `s'il n'a pas été enregistré.\n\nOuvrir « ${document.title} » ?`,
+          onConfirm: () => { setConfirmDialog(null); apply(); },
+        });
+      } else {
+        apply();
       }
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      setAgendaNotice({
+        kind: 'error',
+        text: e instanceof Error ? e.message : `Ouverture impossible : ${e}`,
+      });
+    }
+  };
+
+  /**
+   * Insère un modèle de déroulé.
+   *
+   * L'ordre d'un culte est toujours le même, et c'est précisément pour ça
+   * qu'on en oublie une étape. Le modèle ne contient aucun contenu : chaque
+   * étape est un repère que l'opérateur remplace.
+   */
+  const [showTemplates, setShowTemplates] = useState(false);
+  const applyTemplate = (template: ServiceTemplate, items: any[]) => {
+    // On AJOUTE à la suite plutôt que de remplacer : l'opérateur a parfois
+    // déjà placé deux cantiques avant de penser au déroulé.
+    setPlaylist([...playlist, ...items]);
+    const duration = formatDuration(totalMinutes(template));
+    setAgendaNotice({
+      kind: 'ok',
+      text: `« ${template.label} » ajouté — ${items.length} étapes`
+        + (duration ? ` · environ ${duration}` : '') + '.',
+    });
+    setShowTemplates(false);
+    setShowAddMenu(false);
+  };
+
+  /**
+   * Prépare le culte du sabbat en un geste.
+   *
+   * Réunit la leçon de l'École du Sabbat de la semaine, la méditation
+   * Mofon'aina du jour et le déroulé du culte — soit la dizaine de clics
+   * répartis dans trois écrans qu'on refait chaque semaine.
+   *
+   * Le compte rendu est AFFICHÉ, y compris ce qui manque : un culte à trous
+   * découvert devant l'assemblée serait pire que pas de génération du tout.
+   */
+  const [preparingSabbath, setPreparingSabbath] = useState(false);
+  const prepareSabbath = async () => {
+    setShowAddMenu(false);
+    setPreparingSabbath(true);
+    setAgendaNotice({ kind: 'ok', text: 'Préparation du sabbat…' });
+    try {
+      // La langue est celle choisie dans la section École du Sabbat : on ne la
+      // redemande pas, l'opérateur l'a déjà dite une fois.
+      const lang = localStorage.getItem('ssLang') || 'mg';
+      const plan = await buildSabbathPlan({ lang });
+
+      const apply = () => {
+        setPlaylist([...playlist, ...plan.items]);
+        const lines = [
+          `Sabbath du ${describeSabbath(plan.date)} — ${plan.items.length} élément(s).`,
+          ...plan.included.map((i) => `• ${i}`),
+          ...plan.missing.map((m) => `⚠ ${m}`),
+        ];
+        setAgendaNotice({
+          kind: plan.missing.length > 0 ? 'error' : 'ok',
+          text: lines.join('\n'),
+        });
+      };
+
+      if (playlist.length > 0) {
+        setConfirmDialog({
+          title: 'Ajouter le culte du sabbat ?',
+          confirmLabel: 'Ajouter',
+          message:
+            `${plan.items.length} élément(s) seront ajoutés à la suite des `
+            + `${playlist.length} déjà présents.`,
+          onConfirm: () => { setConfirmDialog(null); apply(); },
+        });
+      } else {
+        apply();
+      }
+    } catch (e) {
+      setAgendaNotice({ kind: 'error', text: `Préparation impossible : ${e}` });
+    } finally {
+      setPreparingSabbath(false);
+    }
   };
 
   const addToAgenda = () => {
@@ -331,7 +504,7 @@ export function LeftSidebar({ songs, playlist, setPlaylist, onSelectSong, isLoad
   };
 
   const addCustomItem = () => {
-    const newItem = { id: Date.now().toString(), title: "Programme Libre", number: "📝", lyrics: "Entrez votre texte ici...", type: "custom" };
+    const newItem = { id: newItemId(), title: "Programme Libre", number: "📝", lyrics: "Entrez votre texte ici...", type: "custom" };
     setPlaylist([...playlist, newItem]);
     onSelectSong(newItem, 'agenda');
   };
@@ -356,7 +529,7 @@ Texte en **gras**, en *italique*, et une liste :
 
   const addMarkdownItem = () => {
     const newItem = {
-      id: Date.now().toString(),
+      id: newItemId(),
       title: "Présentation Markdown",
       number: "📑",
       lyrics: MARKDOWN_TEMPLATE,
@@ -381,7 +554,7 @@ Texte en **gras**, en *italique*, et une liste :
         const content: string = await invoke('read_text_file', { path: file });
         const filename = file.split(/[/\\]/).pop() || 'Markdown';
         const newItem = {
-          id: Date.now().toString(),
+          id: newItemId(),
           title: filename.replace(/\.(md|markdown|mdx)$/i, ''),
           number: '📑',
           lyrics: content,
@@ -415,7 +588,7 @@ Texte en **gras**, en *italique*, et une liste :
         const url = cleanUrl(local.path);
         if (url) {
           setPlaylist([...playlist, {
-            id: Date.now().toString(),
+            id: newItemId(),
             title: `♪ ${item.title}`,
             number: '🎵',
             lyrics: url,
@@ -432,7 +605,7 @@ Texte en **gras**, en *italique*, et une liste :
       }
       const { src, offline } = await hymnAudioSource(item.playback, track);
       setPlaylist([...playlist, {
-        id: Date.now().toString(),
+        id: newItemId(),
         title: `♪ ${item.title}${offline ? '' : ' (en ligne)'}`,
         number: '🎵',
         lyrics: src,
@@ -455,7 +628,7 @@ Texte en **gras**, en *italique*, et une liste :
           // Copy to public/media/ for HTTP access (required on Linux - asset:// doesn't support Range requests)
           const httpUrl: string = await invoke('import_media', { sourcePath: file });
           const filename = file.split(/[/\\]/).pop() || 'Media';
-          const newItem = { id: Date.now().toString(), title: filename, number: type === 'image' ? '🖼️' : '🎬', lyrics: httpUrl, type: type };
+          const newItem = { id: newItemId(), title: filename, number: type === 'image' ? '🖼️' : '🎬', lyrics: httpUrl, type: type };
           setPlaylist([...playlist, newItem]);
         }
     } catch(e) { console.error('addMediaItem error:', e); alert('Erreur: ' + e); }
@@ -507,7 +680,7 @@ Texte en **gras**, en *italique*, et une liste :
 
           const httpUrl: string = await invoke('import_media', { sourcePath: sourceForImport });
           const newItem: any = {
-            id: Date.now().toString(), title: filename, number: '📄',
+            id: newItemId(), title: filename, number: '📄',
             lyrics: httpUrl, type: 'document',
           };
           if (slideVideos.length > 0) {
@@ -539,7 +712,7 @@ Texte en **gras**, en *italique*, et une liste :
         if (file && typeof file === 'string') {
           const httpUrl: string = await invoke('import_media', { sourcePath: file });
           const filename = file.split(/[/\\]/).pop() || 'Audio';
-          const newItem = { id: Date.now().toString(), title: filename, number: '🎵', lyrics: httpUrl, type: 'audio' };
+          const newItem = { id: newItemId(), title: filename, number: '🎵', lyrics: httpUrl, type: 'audio' };
           setPlaylist([...playlist, newItem]);
         }
     } catch(e) { console.error('addAudioItem error:', e); alert('Erreur: ' + e); }
@@ -581,7 +754,7 @@ Texte en **gras**, en *italique*, et une liste :
           setPromptError("Adresse YouTube non reconnue : impossible d'y trouver un identifiant de vidéo.");
           return;
         }
-        const newItem = { id: Date.now().toString(), title: 'Vidéo YouTube', number: '📺', lyrics: videoId, type: 'youtube' };
+        const newItem = { id: newItemId(), title: 'Vidéo YouTube', number: '📺', lyrics: videoId, type: 'youtube' };
         setPlaylist([...playlist, newItem]);
         setPromptDialog(null);
       },
@@ -630,7 +803,7 @@ Texte en **gras**, en *italique*, et une liste :
         promptForced.current = false;
 
         const newItem = {
-          id: Date.now().toString(), title: url, number: '🌐', lyrics: url,
+          id: newItemId(), title: url, number: '🌐', lyrics: url,
           type: 'link', embeddable, embedReason: reason,
         };
         setPlaylist([...playlist, newItem]);
@@ -712,6 +885,15 @@ Texte en **gras**, en *italique*, et une liste :
       style={{ width: width ?? 320 }}
     >
       {/* Custom Confirmation Modal Dialog */}
+      {/* Sélecteur de déroulé : plein écran, parce qu'il montre la source et
+          le déroulé complet avant d'insérer quoi que ce soit. */}
+      {showTemplates && (
+        <ServiceTemplatePicker
+          onClose={() => setShowTemplates(false)}
+          onApply={applyTemplate}
+        />
+      )}
+
       {promptDialog && (
         <div
           className="fixed inset-0 z-[9999] flex items-center justify-center p-4"
@@ -754,7 +936,7 @@ Texte en **gras**, en *italique*, et une liste :
                 className="px-4 py-2 text-xs font-bold text-white bg-[#5865f2] hover:bg-[#4752c4] rounded transition"
                 onClick={() => promptDialog.onSubmit(promptValue)}
               >
-                Ajouter
+                {promptDialog.submitLabel || 'Ajouter'}
               </button>
             </div>
           </div>
@@ -769,7 +951,7 @@ Texte en **gras**, en *italique*, et une liste :
                 <Trash2 size={18} className="text-red-400" />
               </div>
               <div>
-                <p className="text-white font-bold text-sm mb-1">Confirmer la suppression</p>
+                <p className="text-white font-bold text-sm mb-1">{confirmDialog.title || 'Confirmer la suppression'}</p>
                 <p className="text-gray-300 text-xs whitespace-pre-line leading-relaxed">{confirmDialog.message}</p>
               </div>
             </div>
@@ -784,7 +966,7 @@ Texte en **gras**, en *italique*, et une liste :
                 className="px-4 py-2 text-xs font-bold text-white bg-red-600 hover:bg-red-700 rounded transition"
                 onClick={confirmDialog.onConfirm}
               >
-                Supprimer
+                {confirmDialog.confirmLabel || 'Supprimer'}
               </button>
             </div>
           </div>
@@ -812,13 +994,75 @@ Texte en **gras**, en *italique*, et une liste :
                   <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addYoutubeItem(); setShowAddMenu(false); }}><Youtube size={12} /> YouTube</button>
                   <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addLinkItem(); setShowAddMenu(false); }}><Globe size={12} /> Lien Web</button>
                   <button className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2" onClick={() => { addFileItem(); setShowAddMenu(false); }}><FileText size={12} /> Fichier</button>
+
+                  {/* Préparation du sabbat : réunit la leçon de la semaine, la
+                      méditation du jour et le déroulé. Mise en avant parce que
+                      c'est le geste de chaque semaine. */}
+                  <div className="mt-1 border-t border-[#36393f] pt-1">
+                    <button
+                      disabled={preparingSabbath}
+                      title="Leçon de l'École du Sabbat, Mofon'aina du jour et déroulé du culte"
+                      className="w-full text-left px-3 py-2 text-xs font-bold text-amber-300 hover:bg-amber-500 hover:text-black transition flex items-center gap-2 disabled:opacity-50"
+                      onClick={prepareSabbath}
+                    >
+                      <Sparkles size={12} />
+                      {preparingSabbath ? 'Préparation…' : 'Préparer le sabbat'}
+                    </button>
+                  </div>
+
+                  {/* Un seul point d'entrée : le sélecteur montre les
+                      déroulés, leur source et leur contenu avant insertion.
+                      Une liste de noms dans un menu n'aurait rien dit de ce
+                      qu'on ajoute. */}
+                  <button
+                    className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#5865f2] hover:text-white transition flex items-center gap-2"
+                    onClick={() => { setShowTemplates(true); setShowAddMenu(false); }}
+                  >
+                    <List size={12} /> Déroulé de culte…
+                  </button>
                </div>
              )}
-             <button className="p-1 hover:bg-[#3f4147] rounded text-gray-400 hover:text-white transition" onClick={handleLoadAgenda}><FolderOpen size={14} /></button>
-             <button className="p-1 hover:bg-[#3f4147] rounded text-gray-400 hover:text-white transition" onClick={handleSaveAgenda}><Save size={14} /></button>
-             <button className="p-1 hover:bg-red-500/20 rounded text-gray-400 hover:text-red-400 transition" onClick={() => setPlaylist([])}><X size={14} /></button>
+             <button title="Ouvrir un culte enregistré" className="p-1 hover:bg-[#3f4147] rounded text-gray-400 hover:text-white transition" onClick={handleLoadAgenda}><FolderOpen size={14} /></button>
+             <button title="Enregistrer ce culte" className="p-1 hover:bg-[#3f4147] rounded text-gray-400 hover:text-white transition" onClick={handleSaveAgenda}><Save size={14} /></button>
+             {/* Confirmation obligatoire : ce bouton effaçait tout l'agenda
+                 d'un seul clic, à côté de « enregistrer ». Maintenant qu'un
+                 culte se prépare à l'avance, le geste coûte trop cher. */}
+             <button
+               title="Vider l'agenda"
+               className="p-1 hover:bg-red-500/20 rounded text-gray-400 hover:text-red-400 transition"
+               onClick={() => {
+                 if (playlist.length === 0) return;
+                 setConfirmDialog({
+                   title: 'Vider l\'agenda ?',
+                   confirmLabel: 'Vider',
+                   message: `${playlist.length} élément(s) seront retirés.\n\nEnregistre le culte d'abord si tu veux le retrouver.`,
+                   onConfirm: () => { setConfirmDialog(null); setPlaylist([]); setAgendaNotice(null); },
+                 });
+               }}
+             >
+               <X size={14} />
+             </button>
            </div>
         </div>
+
+        {/* Retour des actions sur l'agenda. Refermable, et jamais bloquant. */}
+        {agendaNotice && (
+          <div className={`flex items-start gap-2 px-2 py-1.5 text-[11px] leading-snug ${
+            agendaNotice.kind === 'ok'
+              ? 'bg-emerald-500/10 text-emerald-300'
+              : 'bg-red-500/10 text-red-300'
+          }`}>
+            {/* `pre-line` : le compte rendu du sabbat tient sur plusieurs
+                lignes (ce qui a été trouvé, ce qui manque). */}
+            <span className="min-w-0 flex-1 whitespace-pre-line">{agendaNotice.text}</span>
+            <button
+              onClick={() => setAgendaNotice(null)}
+              className="shrink-0 rounded p-0.5 opacity-70 transition hover:bg-white/10 hover:opacity-100"
+            >
+              <X size={11} />
+            </button>
+          </div>
+        )}
       <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
         {/* Conversion d'un document bureautique : elle dure plusieurs secondes,
             il faut donc qu'elle se voie, sinon on croit que rien ne se passe. */}
@@ -908,11 +1152,22 @@ Texte en **gras**, en *italique*, et une liste :
         </div>
         
         {view === 'store' && (
-          <Library
-            onClose={() => setView('chant')}
-            onLoadDb={onLoadDb}
-            onAddToPlaylist={(item: any) => setPlaylist([...playlist, item])}
-          />
+          /* La bibliothèque est chargée à l'ouverture, pas au démarrage : ses
+             treize sections ne servent pas pendant un culte, et elles
+             retardaient le premier affichage de l'application. Ici le
+             chargement est sans risque — c'est un clic de l'opérateur, pas une
+             diapo attendue par l'assemblée. */
+          <Suspense fallback={
+            <div className="flex-1 flex items-center justify-center text-xs text-gray-500">
+              Ouverture de la bibliothèque…
+            </div>
+          }>
+            <Library
+              onClose={() => setView('chant')}
+              onLoadDb={onLoadDb}
+              onAddToPlaylist={(item: any) => setPlaylist([...playlist, item])}
+            />
+          </Suspense>
         )}
         
 

@@ -168,14 +168,66 @@ renvoient `null` / `false` sans rien afficher. Utiliser la modale interne
 (`promptDialog` dans `LeftSidebar.tsx`) ou `confirm()` du plugin dialog.
 
 **Sources blob non positionnables.** Un audio lu depuis un `blob:` ne démarre
-pas forcément à 0:00. Les écoutes en ligne passent donc par un fichier de cache
-servi par le serveur local, jamais par un blob.
+pas forcément à 0:00. Les écoutes en ligne passent donc par le serveur local,
+jamais par un blob.
 
-**Fenêtre noire au lancement.** Depuis WebKitGTK 2.42, le rendu passe par un
-« DMA-BUF renderer » qui échoue silencieusement sur beaucoup de configurations.
-`WEBKIT_DISABLE_DMABUF_RENDERER=1` et `WEBKIT_DISABLE_COMPOSITING_MODE=1` sont
-posées au démarrage — mais **seulement si l'utilisateur ne les a pas déjà
-définies**, pour pouvoir diagnostiquer depuis le terminal sans recompiler.
+**Écoute en ligne : relais, pas téléchargement.** La route `/audio?u=<url>` du
+serveur média (`relay_audio`) rapatrie la piste **par tranches de 512 Ko** en
+transmettant les en-têtes `Range`. Avant, l'interface téléchargeait le fichier
+entier avant le premier son : 3 à 15 Mo d'attente sans retour visuel. Le relais
+ne répond qu'aux hôtes déjà autorisés pour les téléchargements audio
+(`host_allowed`) — ce n'est pas un proxy générique. Il répond volontairement
+moins d'octets que demandé, ce que HTTP autorise pour un 206 : WebKit demande
+`bytes=0-`, soit tout le fichier.
+
+**Mode de rendu (`apply_render_mode`).** `WEBKIT_DISABLE_DMABUF_RENDERER=1` et
+`WEBKIT_DISABLE_COMPOSITING_MODE=1` corrigent une fenêtre noire ou verte sur
+certaines machines, mais font calculer **chaque image de vidéo par le
+processeur**. Sur un petit processeur (Celeron 2 cœurs), la projection saccade
+et l'audio hache avec elle, alors que la machine sait décoder en matériel.
+Elles ne sont donc plus imposées : le mode se choisit dans
+**bibliothèque > Diagnostic > Rendu des vidéos** et se range dans
+`$XDG_DATA_HOME/com.bryan.myprojector/render.json`.
+
+| Mode | Compositing | DMA-BUF | Décodage |
+|---|---|---|---|
+| `auto` (défaut) | GPU | GPU | VA-API préféré (`GST_PLUGIN_FEATURE_RANK`) |
+| `compat` | GPU | désactivé | VA-API préféré |
+| `software` | désactivé | désactivé | logiciel |
+
+Le réglage est lu **avant** la création du premier WebView (WebKitGTK et
+GStreamer ne lisent ces variables qu'une fois par processus), donc sans passer
+par `app.path()` — d'où le chemin reconstruit à la main. Un changement ne prend
+effet qu'au redémarrage, et l'interface le dit.
+
+**Filet de sécurité (`resolve_render_mode`).** Rendre le mode accéléré par
+défaut déplace le risque : là où le DMA-BUF échoue vraiment, la fenêtre reste
+NOIRE — et un opérateur devant une fenêtre noire ne peut pas cliquer sur le
+réglage qui l'en sortirait. On écrit donc un témoin `pending` dans
+`render.json` AVANT d'ouvrir la fenêtre ; l'interface l'efface
+(`confirm_render_ok`) dès qu'elle a produit des images. Le retrouver au
+démarrage suivant signifie que rien ne s'est affiché : on redescend d'un cran
+(`auto` → `compat` → `software`) et `downgraded_from` permet à la carte
+Diagnostic de l'expliquer, avec un bouton pour revenir en arrière.
+
+⚠ **La confirmation compte de vraies IMAGES, pas le montage de React.** Sur une
+fenêtre noire, le JavaScript s'exécute normalement ; confirmer au montage
+viderait le filet de tout son sens. On attend dix rappels de
+`requestAnimationFrame`, qui est cadencé par le compositeur : si rien n'est
+composé, ils ne viennent pas. Dix images (~1/6 s à 60 Hz) suffisent pour que
+l'usage normal confirme toujours, sans qu'une fermeture immédiate déclenche un
+faux repli — lequel resterait de toute façon visible et annulable d'un clic.
+
+Un seul échec suffit à faire redescendre : attendre deux échecs laisserait
+l'opérateur bloqué plus longtemps, pour un gain nul.
+
+**Les variables déjà définies par l'utilisateur ne sont jamais écrasées**, pour
+pouvoir diagnostiquer depuis le terminal sans recompiler.
+
+**L'optimisation des médias en arrière-plan est réservée aux machines de 4 cœurs
+ou plus.** `nice -n 19` ne suffit pas à deux cœurs : ffprobe puis ffmpeg
+prennent la moitié du processeur, et l'autre moitié doit déjà décoder la vidéo
+et alimenter le pipeline audio.
 
 ---
 

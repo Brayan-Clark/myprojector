@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { ArrowLeft, DownloadCloud, Music, Pause, Play, Plus, Wifi, X } from "lucide-react";
+import { ArrowLeft, DownloadCloud, Loader2, Music, Pause, Play, Plus, Wifi, X } from "lucide-react";
 import {
   fetchPlaybackCollections, fetchPlaybackTracks, formatBytes, listInstalled, trackFileName,
   type PlaybackCollection, type PlaybackTrack,
 } from "../../lib/library";
-import { cleanUrl } from "../../lib/media";
+import { audioRelayUrl, cleanUrl } from "../../lib/media";
+import { newItemId } from "../../lib/items";
 import { useLibraryDownloads } from "./useLibrary";
 import { Card, EmptyState, ErrorBox, InstallButton, OfflineNotice, Spinner } from "./ui";
 
@@ -84,6 +85,9 @@ function TrackList({ collection, search, onBack, onAddToPlaylist }: {
   const [tracks, setTracks] = useState<PlaybackTrack[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState<string | null>(null);
+  /** Piste dont on attend le premier son : sans ce retour, un clic sur
+   *  « lire » n'avait aucun effet visible et on cliquait une seconde fois. */
+  const [loadingId, setLoadingId] = useState<string | null>(null);
   const [playError, setPlayError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const { installed, progress, failed, download, remove, refresh } = useLibraryDownloads("audio", collection.id);
@@ -195,13 +199,11 @@ function TrackList({ collection, search, onBack, onAddToPlaylist }: {
         if (path) source = cleanUrl(path) || null;
       }
 
-      // Sinon on récupère le flux via Rust : l'élément <audio> ne contacte
-      // aucun hôte externe, donc ni la CSP ni la redirection Google Drive ne
-      // peuvent bloquer la lecture.
-      if (!source) {
-        const { cacheRemoteAudio } = await import("../../lib/library");
-        source = await cacheRemoteAudio(track.url, `${collection.id}-${filename}`);
-      }
+      // Sinon on passe par le relais local : l'élément <audio> ne contacte
+      // aucun hôte externe (ni la CSP ni la redirection Google Drive ne
+      // peuvent bloquer la lecture), et la piste arrive par tranches au lieu
+      // d'être téléchargée en entier avant le premier son.
+      if (!source) source = audioRelayUrl(track.url);
 
       // Même précaution que dans le lecteur de présentation : sans `load()`,
       // WebKitGTK garde la position de la piste précédente et la nouvelle
@@ -211,12 +213,19 @@ function TrackList({ collection, search, onBack, onAddToPlaylist }: {
       el.load();
       el.src = source;
       el.load();
+      setLoadingId(track.id);
       await el.play();
-      try { if (el.currentTime > 0.1) el.currentTime = 0; } catch { /* ignoré */ }
+      // Filet de sécurité conservé : si WebKitGTK a malgré tout gardé la
+      // position de la piste précédente, on revient au début. Le seuil est
+      // volontairement haut — quelques dizaines de millisecondes de lecture
+      // sont normales, et les remettre à zéro produirait un à-coup audible.
+      try { if (el.currentTime > 1) el.currentTime = 0; } catch { /* ignoré */ }
       setPlaying(track.id);
     } catch (e) {
       setPlayError(`Lecture impossible : ${e instanceof Error ? e.message : String(e)}`);
       setPlaying(null);
+    } finally {
+      setLoadingId(null);
     }
   };
 
@@ -228,7 +237,7 @@ function TrackList({ collection, search, onBack, onAddToPlaylist }: {
       : await download(track.id, track.url, filename);
     if (!path) return;
     onAddToPlaylist({
-      id: `${Date.now()}`,
+      id: newItemId(),
       title: `${track.c_num || track.id} · ${track.title}`,
       number: "🎵",
       lyrics: path,
@@ -325,7 +334,9 @@ function TrackList({ collection, search, onBack, onAddToPlaylist }: {
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#5865f2]/15 text-[#8891f2] transition hover:bg-[#5865f2] hover:text-white"
                 title={isInstalled ? "Lire (hors ligne)" : "Écouter en ligne"}
               >
-                {playing === track.id ? <Pause size={14} /> : <Play size={14} />}
+                {loadingId === track.id ? <Loader2 size={14} className="animate-spin" />
+                  : playing === track.id ? <Pause size={14} />
+                  : <Play size={14} />}
               </button>
               <span className="w-10 shrink-0 text-right text-[11px] font-bold tabular-nums text-gray-500">
                 {track.c_num || track.id}

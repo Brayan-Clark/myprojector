@@ -97,14 +97,14 @@ export function SlideTransition({
       {previous && (
         <div
           key={`out-${previous.key}`}
-          className={`slide-layer pointer-events-none absolute inset-0 ${exit}`}
+          className={`slide-layer slide-exit pointer-events-none absolute inset-0 ${exit}`}
           style={style}
           aria-hidden
         >
           {previous.node}
         </div>
       )}
-      <div key={`in-${contentKey}`} className={`slide-layer absolute inset-0 ${enter}`} style={style}>
+      <div key={`in-${contentKey}`} className={`slide-layer slide-enter absolute inset-0 ${enter}`} style={style}>
         {children}
       </div>
       {type === "fade-black" && previous && (

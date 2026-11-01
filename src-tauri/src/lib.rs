@@ -8,6 +8,7 @@ use std::io::Write;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+use warp::http;
 use warp::Filter;
 
 fn get_data_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -2946,6 +2947,442 @@ fn reserve_media_port() -> Option<u16> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// Relais audio progressif
+//
+// Pour écouter une piste non téléchargée, l'interface appelait
+// `cacheRemoteAudio` : le fichier ENTIER était rapatrié sur le disque, puis
+// seulement joué. Entre le clic sur « lire » et le premier son il s'écoulait
+// donc le temps d'un téléchargement complet (3 à 15 Mo selon la piste), sans
+// que rien ne bouge à l'écran. C'est ce que l'opérateur décrit par « ça
+// coince ».
+//
+// Ce relais sert la piste distante par tranches, avec les en-têtes `Range` :
+// le lecteur reçoit le début du morceau immédiatement et réclame la suite au
+// fur et à mesure. On ne passe pas par l'hôte distant directement depuis la
+// page (la CSP l'interdit, et les redirections Google Drive la font échouer).
+//
+// ⚠ On répond volontairement avec MOINS d'octets que demandé (HTTP l'autorise
+// explicitement pour une réponse 206) : WebKit demande `bytes=0-`, soit tout
+// le fichier, ce qui nous ramènerait au problème de départ.
+// ---------------------------------------------------------------------------
+
+/// Taille maximale d'une tranche servie par le relais.
+///
+/// Assez grande pour que le pipeline GStreamer ne redemande pas sans cesse,
+/// assez petite pour que la lecture démarre tout de suite.
+const AUDIO_RELAY_CHUNK: u64 = 512 * 1024;
+
+#[derive(Deserialize)]
+struct AudioRelayQuery {
+    /// URL distante absolue de la piste.
+    u: String,
+}
+
+/// Analyse un en-tête `Range` simple (`bytes=<début>-[<fin>]`).
+///
+/// Les plages multiples et les plages suffixes (`bytes=-500`) renvoient `None` :
+/// aucun lecteur média n'en émet, et les gérer à moitié serait pire que de
+/// servir le fichier entier.
+fn parse_byte_range(header: &str) -> Option<(u64, Option<u64>)> {
+    let spec = header.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (start, end) = spec.split_once('-')?;
+    let start = start.trim().parse::<u64>().ok()?;
+    let end = match end.trim() {
+        "" => None,
+        v => Some(v.parse::<u64>().ok()?),
+    };
+    Some((start, end))
+}
+
+/// Sert une tranche de la piste distante.
+///
+/// Ne renvoie jamais de rejet warp : un échec réseau devient une réponse HTTP
+/// explicite, sinon le lecteur reçoit un 404 du routeur et affiche
+/// « source illisible » sans qu'on sache pourquoi.
+async fn relay_audio(
+    query: AudioRelayQuery,
+    range: Option<String>,
+) -> Result<http::Response<Vec<u8>>, std::convert::Infallible> {
+    let fail = |status: u16, why: String| {
+        eprintln!("[relais audio] {why}");
+        Ok(http::Response::builder()
+            .status(status)
+            .header("Content-Type", "text/plain; charset=utf-8")
+            .body(why.into_bytes())
+            .unwrap_or_default())
+    };
+
+    let parsed = match reqwest::Url::parse(&query.u) {
+        Ok(u) => u,
+        Err(e) => return fail(400, format!("URL invalide : {e}")),
+    };
+    // Même garde-fou anti-SSRF que les téléchargements : ce relais ne doit pas
+    // devenir un moyen de lire n'importe quelle URL depuis la machine.
+    let host = parsed.host_str().unwrap_or("").to_string();
+    if !host_allowed("audio", &host) {
+        return fail(403, format!("Hôte non autorisé : {host}"));
+    }
+
+    let client = match reqwest::Client::builder().user_agent("MyProjector/1.0").build() {
+        Ok(c) => c,
+        Err(e) => return fail(500, format!("Client HTTP : {e}")),
+    };
+
+    let wanted = range.as_deref().and_then(parse_byte_range);
+    let mut request = client.get(parsed);
+    if let Some((start, end)) = wanted {
+        let last = start.saturating_add(AUDIO_RELAY_CHUNK).saturating_sub(1);
+        let stop = end.map(|e| e.min(last)).unwrap_or(last);
+        request = request.header("Range", format!("bytes={start}-{stop}"));
+    }
+
+    let response = match request.send().await {
+        Ok(r) => r,
+        Err(e) => return fail(502, format!("Hôte distant injoignable : {e}")),
+    };
+
+    let status = response.status();
+    let headers = response.headers().clone();
+    if !status.is_success() {
+        return fail(502, format!("Hôte distant : HTTP {status}"));
+    }
+    let body = match response.bytes().await {
+        Ok(b) => b.to_vec(),
+        Err(e) => return fail(502, format!("Lecture du flux : {e}")),
+    };
+
+    let mut builder = http::Response::builder()
+        .header("Accept-Ranges", "bytes")
+        // Le cache du WebView ne doit pas garder une tranche : c'est le disque
+        // local qui sert de cache, via un vrai téléchargement.
+        .header("Cache-Control", "no-store");
+    if let Some(kind) = headers.get(reqwest::header::CONTENT_TYPE) {
+        builder = builder.header("Content-Type", kind);
+    } else {
+        builder = builder.header("Content-Type", "audio/mpeg");
+    }
+
+    // 206 : l'hôte a respecté la plage, on la transmet telle quelle.
+    // 200 : l'hôte IGNORE `Range` (c'est le cas de certains partages Google
+    // Drive). On sert alors tout le corps — le comportement d'avant, mais
+    // seulement pour ces hôtes-là au lieu de tous.
+    if status == reqwest::StatusCode::PARTIAL_CONTENT {
+        if let Some(content_range) = headers.get(reqwest::header::CONTENT_RANGE) {
+            builder = builder.header("Content-Range", content_range);
+        }
+        builder = builder.status(206);
+    } else {
+        builder = builder.status(200);
+    }
+
+    Ok(builder
+        .header("Content-Length", body.len())
+        .body(body)
+        .unwrap_or_default())
+}
+
+// ---------------------------------------------------------------------------
+// Mode de rendu média
+//
+// L'application FORÇAIT jusqu'ici `WEBKIT_DISABLE_COMPOSITING_MODE=1` et
+// `WEBKIT_DISABLE_DMABUF_RENDERER=1`. Ces deux variables corrigent bien une
+// fenêtre noire ou verte sur certaines machines, mais elles ont un coût qui
+// n'avait pas été mesuré : tout le rendu — y compris CHAQUE image de vidéo —
+// repasse par le processeur, et les images décodées ne peuvent plus être
+// partagées avec le compositeur sans recopie.
+//
+// Sur la machine de référence du projet (Celeron N4020C, 2 coeurs à 1,1 GHz,
+// Intel UHD 600), c'est rédhibitoire : une vidéo 1080p sature les deux coeurs,
+// l'image saccade, et l'audio hache avec elle puisqu'il n'y a plus de coeur
+// disponible pour le pipeline GStreamer. Or cette même machine sait décoder en
+// MATÉRIEL (vah264dec, vaapih264dec).
+//
+// Le réglage devient donc un choix explicite, persistant, modifiable depuis la
+// bibliothèque > Diagnostic :
+//
+//   - `auto`     (défaut) : GPU actif + décodage matériel VA-API préféré.
+//   - `compat`   : compositing GPU gardé, renderer DMA-BUF désactivé — pour les
+//                  configurations où le DMA-BUF échoue (NVIDIA propriétaire,
+//                  Mesa ancien, machines virtuelles, Xwayland).
+//   - `software` : l'ancien comportement, tout en logiciel. Dernier recours
+//                  quand la fenêtre reste noire ou verte.
+//
+// Les variables d'environnement posées à la main gardent la priorité : on peut
+// toujours diagnostiquer depuis un terminal sans toucher au réglage.
+// ---------------------------------------------------------------------------
+
+pub const RENDER_MODES: [&str; 3] = ["auto", "compat", "software"];
+
+/// Décodeurs matériels à privilégier sur les décodeurs logiciels de libav.
+///
+/// 512 vaut plus que `GST_RANK_PRIMARY` (256) : sans ça, GStreamer choisit
+/// `avdec_h264` (processeur) alors que `vah264dec` (carte graphique) est
+/// disponible, ce qui est exactement le contraire de ce qu'il faut sur un
+/// petit processeur.
+const HW_DECODER_RANKS: &str = concat!(
+    "vah264dec:512,vah265dec:512,vavp8dec:512,vavp9dec:512,",
+    "vaav1dec:512,vampeg2dec:512,vajpegdec:512,",
+    "vaapih264dec:512,vaapih265dec:512,vaapivp8dec:512,vaapivp9dec:512"
+);
+
+/// Emplacement du réglage.
+///
+/// Il est lu AVANT que Tauri n'existe (les variables d'environnement doivent
+/// être posées avant la création du premier WebView), donc on ne peut pas
+/// passer par `app.path()`. On reproduit le chemin que Tauri utilise sous
+/// Linux : `$XDG_DATA_HOME/<identifier>`, sinon `~/.local/share/<identifier>`.
+fn render_config_path() -> Option<PathBuf> {
+    let base = match std::env::var_os("XDG_DATA_HOME") {
+        Some(v) if !v.is_empty() => PathBuf::from(v),
+        _ => PathBuf::from(std::env::var_os("HOME")?).join(".local/share"),
+    };
+    Some(base.join("com.bryan.myprojector").join("render.json"))
+}
+
+fn normalize_render_mode(value: &str) -> String {
+    let v = value.trim().to_lowercase();
+    if RENDER_MODES.contains(&v.as_str()) { v } else { "auto".to_string() }
+}
+
+/// Le mode immédiatement moins exigeant, ou `None` au plus bas.
+fn weaker_render_mode(mode: &str) -> Option<&'static str> {
+    match mode {
+        "auto" => Some("compat"),
+        "compat" => Some("software"),
+        _ => None, // `software` est le dernier recours : rien en dessous.
+    }
+}
+
+/// Contenu de `render.json`.
+#[derive(Default, Serialize, Deserialize)]
+struct RenderConfig {
+    #[serde(default)]
+    mode: String,
+    /// Mode d'un lancement COMMENCÉ mais jamais confirmé par l'interface.
+    ///
+    /// C'est le cœur du filet de sécurité : la valeur est posée avant la
+    /// création de la fenêtre et effacée dès que l'interface a produit des
+    /// images. La retrouver au démarrage suivant signifie donc que la fois
+    /// précédente n'a RIEN affiché.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending: Option<String>,
+    /// Mode depuis lequel on a dû redescendre, pour que l'interface l'explique.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    downgraded_from: Option<String>,
+}
+
+fn read_render_config() -> RenderConfig {
+    let Some(path) = render_config_path() else { return RenderConfig::default() };
+    let Ok(text) = fs::read_to_string(&path) else { return RenderConfig::default() };
+    // Un réglage corrompu ne doit pas décider du rendu à la place de
+    // l'opérateur : on repart du défaut.
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+fn write_render_config(config: &RenderConfig) -> Result<(), String> {
+    let path = render_config_path().ok_or("Dossier de configuration introuvable.")?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("création du dossier : {e}"))?;
+    }
+    let text = serde_json::to_string(config).map_err(|e| e.to_string())?;
+    fs::write(&path, format!("{text}\n")).map_err(|e| format!("écriture du réglage : {e}"))
+}
+
+/// Mode enregistré, `auto` par défaut.
+fn read_render_mode() -> String {
+    normalize_render_mode(&read_render_config().mode)
+}
+
+/// Décide du mode de CE lancement, et arme le filet de sécurité.
+///
+/// ⚠ Pourquoi ce filet existe.
+///
+/// Jusqu'à la version 0.1.1, le rendu logiciel était imposé à toutes les
+/// machines. Le rendre optionnel — et accéléré par défaut — rend la projection
+/// fluide, mais déplace le risque : sur une configuration où le DMA-BUF échoue
+/// vraiment (pilote NVIDIA propriétaire, Mesa ancien, machine virtuelle), la
+/// fenêtre reste NOIRE. Et un opérateur devant une fenêtre noire ne peut pas
+/// cliquer sur le réglage qui l'en sortirait.
+///
+/// On pose donc un témoin avant d'ouvrir la fenêtre. L'interface l'efface dès
+/// qu'elle a réellement produit des images (voir `confirm_render_ok`). Si on le
+/// retrouve au démarrage suivant, c'est que rien ne s'est affiché : on
+/// redescend d'un cran tout seul, et on le DIT.
+///
+/// Un échec suffit à faire redescendre. C'est volontaire : attendre deux
+/// échecs laisserait l'opérateur bloqué plus longtemps, et une fausse alerte
+/// (application fermée dans la demi-seconde qui suit l'ouverture) se corrige
+/// d'un clic depuis le Diagnostic, qui affiche la raison.
+fn resolve_render_mode() -> String {
+    let mut config = read_render_config();
+    let requested = normalize_render_mode(&config.mode);
+
+    let effective = match config.pending.as_deref() {
+        Some(failed) => {
+            let failed = normalize_render_mode(failed);
+            match weaker_render_mode(&failed) {
+                Some(weaker) => {
+                    eprintln!(
+                        "[render] le démarrage précédent en « {failed} » n'a rien affiché \
+                         -> repli sur « {weaker} »"
+                    );
+                    config.downgraded_from = Some(failed);
+                    weaker.to_string()
+                }
+                None => {
+                    // Déjà au plus bas : on n'a plus rien à proposer, mais on
+                    // ne masque pas le problème.
+                    eprintln!(
+                        "[render] le démarrage précédent en « {failed} » n'a rien affiché, \
+                         et c'est déjà le mode le plus compatible."
+                    );
+                    failed
+                }
+            }
+        }
+        None => requested,
+    };
+
+    config.mode = effective.clone();
+    config.pending = Some(effective.clone());
+    if let Err(e) = write_render_config(&config) {
+        // Sans témoin, on perd le filet — mais pas le démarrage.
+        eprintln!("[render] témoin de démarrage non écrit : {e}");
+    }
+    effective
+}
+
+/// L'interface a produit des images : le mode en cours fonctionne.
+///
+/// Appelée UNIQUEMENT par la fenêtre de contrôle, et seulement après que
+/// plusieurs images ont réellement été composées — pas au simple montage de
+/// React. Sur une fenêtre noire, le code s'exécute mais aucune image ne sort :
+/// confirmer trop tôt viderait le filet de tout son sens.
+#[tauri::command]
+fn confirm_render_ok() -> Result<(), String> {
+    let mut config = read_render_config();
+    if config.pending.is_none() {
+        return Ok(()); // déjà confirmé par cette session
+    }
+    config.pending = None;
+    write_render_config(&config)
+}
+
+/// Pose les variables d'environnement correspondant au mode.
+/// `set` n'écrase jamais une variable déjà définie par l'utilisateur.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn apply_render_mode(mode: &str, set: fn(&str, &str)) {
+    println!("[render] mode « {mode} »");
+    match mode {
+        "software" => {
+            // Ancien comportement : aucune accélération, aucun partage d'image.
+            set("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+            set("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+        "compat" => {
+            // Le compositing GPU reste actif ; seul le chemin DMA-BUF, qui
+            // échoue silencieusement sur certains pilotes, est écarté.
+            set("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+            set("GST_PLUGIN_FEATURE_RANK", HW_DECODER_RANKS);
+        }
+        _ => {
+            // `auto` : on ne désactive RIEN, et on demande explicitement le
+            // décodage matériel.
+            set("GST_PLUGIN_FEATURE_RANK", HW_DECODER_RANKS);
+        }
+    }
+}
+
+#[tauri::command]
+fn get_render_mode() -> String {
+    read_render_mode()
+}
+
+/// Enregistre le mode. Il ne prend effet qu'au prochain démarrage : WebKitGTK
+/// et GStreamer lisent ces variables une seule fois, à l'initialisation du
+/// processus. L'interface DOIT donc le dire à l'opérateur.
+#[tauri::command]
+fn set_render_mode(mode: String) -> Result<(), String> {
+    let mut config = read_render_config();
+    config.mode = normalize_render_mode(&mode);
+    // L'opérateur reprend la main : on efface l'explication du repli
+    // automatique, et le témoin de la session en cours — sinon le choix qu'il
+    // vient de faire serait annulé par un repli au prochain démarrage.
+    config.downgraded_from = None;
+    config.pending = None;
+    write_render_config(&config)
+}
+
+#[derive(Serialize)]
+struct RenderDiagnostic {
+    /// Mode enregistré (celui qui s'appliquera au prochain démarrage).
+    mode: String,
+    /// Mode depuis lequel on a dû redescendre automatiquement, s'il y en a un.
+    /// L'interface doit l'expliquer : un repli silencieux priverait l'opérateur
+    /// de la fluidité sans qu'il sache pourquoi.
+    downgraded_from: Option<String>,
+    cores: usize,
+    /// true si un périphérique de rendu DRM existe (`/dev/dri/renderD*`).
+    gpu_device: bool,
+    /// Décodeurs matériels GStreamer effectivement installés.
+    hw_decoders: Vec<String>,
+    /// Valeurs réellement vues par ce processus, pour lever tout doute.
+    compositing_disabled: bool,
+    dmabuf_disabled: bool,
+    feature_rank: Option<String>,
+}
+
+/// État réel du chemin de rendu, pour la section Diagnostic.
+///
+/// On interroge GStreamer plutôt que de deviner : « la machine a un GPU Intel »
+/// ne dit pas si le greffon `va` est installé, et c'est lui qui décide.
+#[tauri::command]
+fn render_diagnostic() -> RenderDiagnostic {
+    let gpu_device = fs::read_dir("/dev/dri")
+        .map(|entries| {
+            entries.flatten().any(|e| {
+                e.file_name().to_string_lossy().starts_with("renderD")
+            })
+        })
+        .unwrap_or(false);
+
+    // `gst-inspect-1.0 <element>` sort en 0 si l'élément existe. On ne teste
+    // que les décodeurs qui changent vraiment la vie sur un petit processeur.
+    let mut hw_decoders = Vec::new();
+    for element in ["vah264dec", "vah265dec", "vavp9dec", "vaapih264dec", "msdkh264dec"] {
+        let found = Command::new("gst-inspect-1.0")
+            .arg(element)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if found {
+            hw_decoders.push(element.to_string());
+        }
+    }
+
+    let flag = |key: &str| {
+        std::env::var(key).map(|v| v != "0" && !v.is_empty()).unwrap_or(false)
+    };
+
+    let config = read_render_config();
+    RenderDiagnostic {
+        mode: normalize_render_mode(&config.mode),
+        downgraded_from: config.downgraded_from,
+        cores: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+        gpu_device,
+        hw_decoders,
+        compositing_disabled: flag("WEBKIT_DISABLE_COMPOSITING_MODE"),
+        dmabuf_disabled: flag("WEBKIT_DISABLE_DMABUF_RENDERER"),
+        feature_rank: std::env::var("GST_PLUGIN_FEATURE_RANK").ok(),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // --- Une seule instance ------------------------------------------------
@@ -2987,18 +3424,8 @@ pub fn run() {
             }
         }
 
-        // Fix for AppImage -- disable GPU compositing to prevent green screen artifacts
-        // NOTE: We intentionally do NOT disable HW_ACCELERATION as that breaks video playback
-        set_env_default("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        apply_render_mode(&resolve_render_mode(), set_env_default);
 
-        // FENETRE NOIRE / VIDE au lancement (surtout en AppImage) :
-        // depuis WebKitGTK 2.42, le rendu passe par un "DMA-BUF renderer" qui
-        // échoue silencieusement sur beaucoup de configs (pilotes NVIDIA
-        // propriétaires, Mesa ancien, machines virtuelles, Wayland+Xwayland).
-        // Le processus se lance normalement mais ne peint jamais rien.
-        // On repasse sur le chemin de rendu classique, qui marche partout.
-        set_env_default("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-        
         // Force GStreamer to use bundled plugins (important for AppImage)
         // This avoids conflicts with system gstreamer plugins that may not support H264/VP8
         if std::env::var("APPDIR").is_ok() {
@@ -3074,16 +3501,27 @@ pub fn run() {
                     
                     // On ne sert QUE le dossier AppData pour plus de stabilité
                     let fs_route = host_ok
+                        .clone()
                         .and(warp::path("fs"))
-                        .and(warp::fs::dir(_app_data_path))
-                        .with(cors);
-                    
+                        .and(warp::fs::dir(_app_data_path));
+
+                    // Relais des pistes distantes, par tranches (voir `relay_audio`).
+                    let audio_route = host_ok
+                        .and(warp::path("audio"))
+                        .and(warp::path::end())
+                        .and(warp::get())
+                        .and(warp::query::<AudioRelayQuery>())
+                        .and(warp::header::optional::<String>("range"))
+                        .and_then(relay_audio);
+
+                    let routes = fs_route.or(audio_route).with(cors);
+
                     // Le port a été réservé AVANT le démarrage de l'application
                     // (voir `reserve_media_port`), donc ce bind ne peut plus
                     // échouer sur un port déjà pris.
                     let port = MEDIA_PORT.load(std::sync::atomic::Ordering::Relaxed);
                     println!("Media server (AppData only) running on http://127.0.0.1:{port}");
-                    warp::serve(fs_route).run(([127, 0, 0, 1], port)).await;
+                    warp::serve(routes).run(([127, 0, 0, 1], port)).await;
                 });
             });
 
@@ -3096,6 +3534,22 @@ pub fn run() {
                     std::thread::sleep(std::time::Duration::from_secs(15));
                     if ffmpeg_path().is_none() {
                         println!("Optimisation des médias: ffmpeg introuvable, ignoré.");
+                        return;
+                    }
+                    // Sur une machine à deux coeurs, `nice` ne suffit pas :
+                    // ffprobe puis ffmpeg occupent la moitié du processeur, et
+                    // la moitié restante doit déjà décoder la vidéo, peindre
+                    // l'interface et alimenter le pipeline audio. Résultat
+                    // observé : audio haché et vidéo saccadée pendant les
+                    // premières minutes de chaque session. L'optimisation est
+                    // un confort, pas une fonction : on la réserve aux
+                    // machines qui peuvent la payer.
+                    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+                    if cores < 4 {
+                        println!(
+                            "Optimisation des médias: {cores} coeur(s) seulement, ignorée \
+                             (elle volerait le processeur à la lecture)."
+                        );
                         return;
                     }
                     // JAMAIS pendant une projection : une compression H.264 sature
@@ -3227,6 +3681,10 @@ pub fn run() {
             fetch_parallel_verse,
             check_embeddable,
             media_server_port,
+            get_render_mode,
+            set_render_mode,
+            render_diagnostic,
+            confirm_render_ok,
             debug_log,
             prime_live_webview,
             office_status,

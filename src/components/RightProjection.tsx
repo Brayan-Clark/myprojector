@@ -1,8 +1,8 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { Star, AlertCircle, AlertTriangle, Presentation, MonitorOff, Headphones, Youtube, Globe, FileText, Camera, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Film, Gauge } from 'lucide-react';
 import { cleanUrl } from '../lib/media';
-import { PdfViewer } from './PdfViewer';
-import { MarkdownView } from './MarkdownView';
+import { PdfViewer } from './lazy';
+import { MarkdownView } from './lazy';
 import { getSlides } from '../lib/slides';
 import { NEXT_KEYS, PREV_KEYS, isTypingTarget, focusSlideList, SLIDE_LIST_ID } from '../lib/keys';
 import { BackgroundVideo } from './BackgroundVideo';

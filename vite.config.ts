@@ -30,4 +30,20 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+
+  // Tests : uniquement les modules PURS de `src/lib`.
+  //
+  // Pas d'environnement DOM à dessein. Les composants de cette application se
+  // testeraient mal (il faudrait une fenêtre de projection, un second écran,
+  // une base SQLite), alors que la logique qui casse pour de vrai — découpage
+  // des diapos, références bibliques, carte audio, conversion des leçons — est
+  // entièrement pure. On teste là où le rapport valeur/coût est le meilleur,
+  // pas partout.
+  test: {
+    include: ["src/lib/**/*.test.ts"],
+    environment: "node",
+    // Ces tests ne touchent ni au disque ni à un état global : un worker par
+    // fichier ne protège de rien et coûte ~240 ms de démarrage chacun.
+    isolate: false,
+  },
 }));

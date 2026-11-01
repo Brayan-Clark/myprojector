@@ -24,8 +24,27 @@
  * même `localStorage`.
  */
 function mediaServer(): string {
+  return `${mediaOrigin()}/fs/`;
+}
+
+function mediaOrigin(): string {
   const port = localStorage.getItem("mediaPort") || "11223";
-  return `http://127.0.0.1:${port}/fs/`;
+  return `http://127.0.0.1:${port}`;
+}
+
+/**
+ * URL locale qui relaie une piste distante, par tranches.
+ *
+ * À préférer au téléchargement complet (`cacheRemoteAudio`) pour une simple
+ * écoute : le lecteur reçoit le début du morceau tout de suite au lieu
+ * d'attendre les 3 à 15 Mo du fichier entier. Voir `relay_audio` dans
+ * `src-tauri/src/lib.rs` pour le détail des en-têtes `Range`.
+ *
+ * Le relais n'accepte que les hôtes déjà autorisés pour les téléchargements
+ * audio : ce n'est pas un proxy générique.
+ */
+export function audioRelayUrl(remoteUrl: string): string {
+  return `${mediaOrigin()}/audio?u=${encodeURIComponent(remoteUrl)}`;
 }
 
 // Folders that live directly under the app-data root and are exposed by warp.

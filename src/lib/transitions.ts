@@ -3,21 +3,25 @@
 // Le changement de diapo était une coupe sèche. Ça fonctionne, mais à l'écran
 // ça saute — et c'est l'un des rares détails que toute l'assemblée remarque.
 //
-// ⚠ Contrainte réelle de cette application : le compositing de WebKitGTK est
-// désactivé au démarrage (`WEBKIT_DISABLE_COMPOSITING_MODE=1`, voir
-// ARCHITECTURE §5), sinon la fenêtre reste noire sur beaucoup de machines.
-// Les animations sont donc calculées par le processeur, pas par la carte
-// graphique. Deux conséquences qui expliquent les choix ci-dessous :
+// Deux règles tiennent tout le reste :
 //
 //   1. On n'anime QUE `opacity`, `transform` et `filter` — jamais une
 //      géométrie (largeur, marges), qui forcerait un recalcul de mise en page
 //      à chaque image.
-//   2. Les durées restent courtes. Au-delà d'une demi-seconde, une animation
-//      logicielle sur un écran de projection se voit saccader.
+//   2. Les durées restent courtes. Au-delà d'une demi-seconde, une transition
+//      sur un écran de projection commence à se voir comme un effet, et non
+//      comme un enchaînement.
+//
+// ⚠ Le chemin de rendu n'est plus imposé : il se choisit dans
+// bibliothèque > Diagnostic > « Rendu des vidéos » (voir `apply_render_mode`
+// dans src-tauri/src/lib.rs). En mode « Logicielle », ces animations sont
+// calculées par le processeur ; c'est pourquoi `blur` y est à éviter, et
+// pourquoi la liste ci-dessous le signale.
 
 export type TransitionType =
   | "none"
   | "fade"
+  | "dissolve"
   | "fade-black"
   | "slide-left"
   | "slide-right"
@@ -38,6 +42,7 @@ export const DEFAULT_TRANSITION: TransitionSettings = { type: "fade", duration: 
 export const TRANSITIONS: { value: TransitionType; label: string; hint: string }[] = [
   { value: "none", label: "Aucune (coupe)", hint: "Changement instantané" },
   { value: "fade", label: "Fondu", hint: "Le plus discret — recommandé" },
+  { value: "dissolve", label: "Fondu croisé", hint: "Les deux diapos se superposent brièvement" },
   { value: "fade-black", label: "Fondu au noir", hint: "Passe par un noir, marque la rupture" },
   { value: "slide-left", label: "Glissement ←", hint: "La diapo entre par la droite" },
   { value: "slide-right", label: "Glissement →", hint: "La diapo entre par la gauche" },
@@ -45,7 +50,7 @@ export const TRANSITIONS: { value: TransitionType; label: string; hint: string }
   { value: "slide-down", label: "Glissement ↓", hint: "Entre par le haut" },
   { value: "zoom-in", label: "Zoom avant", hint: "La diapo s'approche" },
   { value: "zoom-out", label: "Zoom arrière", hint: "La diapo s'éloigne" },
-  { value: "blur", label: "Flou", hint: "Mise au point progressive" },
+  { value: "blur", label: "Flou", hint: "Mise au point progressive — à éviter en rendu logiciel" },
 ];
 
 export function withTransitionDefaults(t?: Partial<TransitionSettings> | null): TransitionSettings {

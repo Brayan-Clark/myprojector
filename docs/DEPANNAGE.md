@@ -52,17 +52,64 @@ minutes pour la laisser se faire.
 
 ### Fenêtre noire, l'application se lance mais n'affiche rien
 
-Le « DMA-BUF renderer » de WebKitGTK ≥ 2.42 échoue silencieusement sur beaucoup
-de configurations (pilotes NVIDIA propriétaires, Mesa ancien, machines
-virtuelles, Wayland + Xwayland). L'application pose déjà les contournements.
+Le « DMA-BUF renderer » de WebKitGTK ≥ 2.42 échoue silencieusement sur certaines
+configurations (pilotes NVIDIA propriétaires, Mesa ancien, machines virtuelles,
+Wayland + Xwayland).
 
-Pour tester d'autres combinaisons sans recompiler — les variables déjà définies
-par l'utilisateur ne sont jamais écrasées :
+Ouvrir **bibliothèque > Diagnostic > Rendu des vidéos** et descendre d'un cran :
+`Accélérée` → `Compatibilité` → `Logicielle`. Le choix s'applique au
+redémarrage. Si la fenêtre est trop noire pour cliquer, le même résultat
+s'obtient depuis un terminal — les variables définies à la main gardent la
+priorité sur le réglage :
 
 ```bash
-WEBKIT_DISABLE_DMABUF_RENDERER=0 ./MyProjector.AppImage
-WEBKIT_DISABLE_COMPOSITING_MODE=0 ./MyProjector.AppImage
+WEBKIT_DISABLE_DMABUF_RENDERER=1 ./MyProjector.AppImage   # équivaut à « Compatibilité »
+WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 ./MyProjector.AppImage   # « Logicielle »
 ```
+
+### La vidéo saccade, le son hache
+
+Symptôme inverse du précédent : c'est le rendu **logiciel** qui coûte trop cher.
+Chaque image est alors calculée par le processeur, et sur deux cœurs il n'en
+reste plus pour le pipeline audio.
+
+Dans **Diagnostic > Rendu des vidéos**, vérifier la ligne d'état en bas de la
+carte. Si elle indique « compositing désactivé » alors que la machine affiche un
+décodage matériel disponible, repasser en `Accélérée` et redémarrer. La carte
+signale elle-même le cas (bandeau orange) quand la machine a deux cœurs ou
+moins.
+
+Deux autres pistes, dans l'ordre :
+
+1. **Aperçu allégé.** Le bouton `Fidèle` / `Allégé` en haut de l'aperçu : en
+   mode fidèle, la même vidéo est décodée deux fois (aperçu + écran de
+   projection). `Allégé` est le défaut, et le bon réglage.
+2. **Décodeur matériel absent.** `gst-inspect-1.0 vah264dec` doit répondre.
+   Sinon : `sudo apt install gstreamer1.0-vaapi gstreamer1.0-plugins-bad`.
+
+### « Unable to open pipewire remote. Error: Le délai d'attente est dépassé »
+
+**Rien à corriger, rien n'est cassé.** Ce message vient de WebKitGTK, pas de
+MyProjector.
+
+Parce que la capture caméra/micro est activée, WebKit tente aussi le chemin
+PipeWire de **capture d'écran**, qui passe par l'interface D-Bus
+`org.freedesktop.portal.ScreenCast`. Beaucoup de bureaux ne l'implémentent pas
+(Cinnamon sous X11, par exemple) : WebKit attend, puis abandonne.
+
+MyProjector ne capture jamais l'écran, donc rien n'est perdu — et la caméra
+continue de fonctionner, elle passe par V4L2. Coût mesuré : environ 1,5 s, une
+seule fois, et seulement lors d'une demande de permission.
+
+Pour vérifier que c'est bien ça :
+
+```bash
+pgrep -a pipewire        # PipeWire tourne-t-il ? (en général oui)
+gdbus introspect --session --dest org.freedesktop.portal.Desktop \
+  --object-path /org/freedesktop/portal/desktop | grep ScreenCast
+```
+
+Si `ScreenCast` n'apparaît pas, c'est le cas décrit ici.
 
 ### La projection s'ouvre sur le même écran
 

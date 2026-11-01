@@ -47,10 +47,53 @@ export interface Meditation {
   verset_texte: string;
   verset_reference: string;
   contenu: string;
+  // --- Extras publiés par le livret, à partir du trimestre 4 de 2026 --------
+  //
+  // Tous optionnels, et le livret ne les publie PAS tous les jours : la
+  // lecture du livre paraît le dimanche, le coucher du soleil le vendredi et
+  // le sabbat. Chaque ligne doit donc être affichée conditionnellement, sinon
+  // on montre des champs vides la plupart des jours.
+  /** Référence de la citation (« RH, 2 Febroary 1897. »). */
+  source?: string;
+  /** Jour de la semaine tel qu'imprimé dans le livret (« Talata »). */
+  jour_semaine?: string;
+  /**
+   * Plan de lecture biblique de l'année — « Diabe » dans le livret.
+   * ⚠ Le nom du champ dit « psaume » mais le contenu ne s'y limite pas.
+   */
+  psaume_du_jour?: string;
+  /** Lecture du livre de l'année — « Velomin'ny teniny ». */
+  lecture_du_jour?: string;
+  /** Heure du coucher du soleil — « Filentehan'ny masoandro ». */
+  coucher_du_soleil?: string;
 }
 export interface MofonainaFile {
   trimestre: { annee: number; numero_trimestre: number; titre_principal: string };
   meditations: Meditation[];
+  /** Abréviations utilisées par les sources du livret (« RH », « DHK »…). */
+  abbreviations?: Record<string, string>;
+}
+
+/** Un trimestre tel que décrit par `mofonaina/manifest.json`. */
+export interface MofonainaQuarter {
+  id: string;
+  annee: number;
+  trimestre: number;
+  titre: string;
+  file: string;
+  url: string;
+  /** Première et dernière méditation. Le livret ne suit PAS le calendrier :
+   *  le trimestre 4 de 2026 commence le 27 septembre. */
+  startDate: string;
+  endDate: string;
+  count: number;
+  size?: string;
+  version: number;
+}
+export interface MofonainaManifest {
+  version: number;
+  updatedAt: string;
+  quarters: MofonainaQuarter[];
 }
 
 export interface LibraryFile { filename: string; path: string; size: number }
@@ -101,8 +144,21 @@ export const fetchPlaybackTracks = (id: string) =>
   getJson<PlaybackTrack[]>(`audio/playbacks/${id}.json`, cacheKey(`audio-tracks-${id}`));
 
 /**
+ * Manifeste des trimestres Mofon'aina.
+ *
+ * Il apporte ce que la simple liste de fichiers ne pouvait pas donner : le
+ * titre du livret, ses vraies dates de début et de fin, le nombre de
+ * méditations, le poids et un numéro de version. Sans lui, une fiche de
+ * trimestre ne pouvait afficher que « 2026 · trimestre 4 », et rien ne
+ * permettait de savoir qu'un trimestre déjà installé avait été corrigé depuis.
+ */
+export const fetchMofonainaManifest = () =>
+  getJson<MofonainaManifest>("mofonaina/manifest.json", "mofonaina-manifest");
+
+/**
  * Trimestres Mofon'aina disponibles (listés côté Rust : l'API GitHub n'est pas
- * autorisée par la CSP). Même repli hors ligne que les autres catalogues.
+ * autorisée par la CSP). Repli quand le manifeste est absent — il n'existe que
+ * depuis septembre 2026, et les anciennes publications n'en ont pas.
  */
 export async function fetchMofonainaFiles(): Promise<Cached<string[]>> {
   const key = "mofonaina-index";
@@ -150,13 +206,24 @@ export function formatBytes(n: number): string {
   return mo >= 1 ? `${mo.toFixed(1)} Mo` : `${Math.round(n / 1024)} Ko`;
 }
 
-/** Découpe une méditation en "versets" projetables (un paragraphe par écran). */
+/**
+ * Découpe une méditation en "versets" projetables (un paragraphe par écran).
+ *
+ * La source (« RH, 2 Febroary 1897. ») termine la dernière diapo au lieu
+ * d'occuper un écran à elle seule : c'est une référence, pas une pensée.
+ */
 export function meditationToLyrics(m: Meditation): string {
-  const parts = [
-    `${m.verset_texte}\n(${m.verset_reference})`,
-    ...m.contenu.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean),
-  ];
-  return parts.join("\n\n");
+  const paragraphs = m.contenu.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+  const source = m.source?.trim();
+  if (source && paragraphs.length > 0) {
+    // ⚠ Un SEUL retour à la ligne. Une ligne vide est le séparateur de diapos
+    // (voir `getSlides`) : avec `\n\n`, la source se retrouvait projetée seule
+    // sur un écran — exactement ce que cette fonction cherche à éviter.
+    paragraphs[paragraphs.length - 1] += `\n— ${source}`;
+  } else if (source) {
+    paragraphs.push(`— ${source}`);
+  }
+  return [`${m.verset_texte}\n(${m.verset_reference})`, ...paragraphs].join("\n\n");
 }
 
 /**
@@ -207,36 +274,21 @@ export async function hymnAudioSource(
   } catch (e) {
     console.warn("hymnAudioSource: lecture locale impossible", e);
   }
-  return { src: track.url, offline: false };
+  // Pas de fichier local : on passe par le relais, PAS par l'URL distante.
+  // Celle-ci est refusée par la CSP de l'application (`media-src` ne liste que
+  // le serveur local), et les hôtes qui redirigent — Google Drive notamment —
+  // la font échouer de toute façon. Le relais sert la piste par tranches, donc
+  // la lecture démarre sans attendre le fichier entier.
+  const { audioRelayUrl } = await import("./media");
+  return { src: audioRelayUrl(track.url), offline: false };
 }
-
-/** Dossier de cache des écoutes en ligne, distinct des vrais téléchargements. */
-export const AUDIO_CACHE = "_cache";
 
 /**
- * Prépare une écoute en ligne et renvoie une URL LOCALE lisible.
+ * Dossier de cache des écoutes en ligne, distinct des vrais téléchargements.
  *
- * Le fichier est déposé dans un cache puis servi par le serveur local, au lieu
- * d'être lu depuis un `blob:`. C'est le chemin déjà utilisé par les audios
- * téléchargés, et c'est le seul qui démarre réellement à 0:00 : sur une source
- * blob, WebKitGTK ne dispose pas d'un flux positionnable et la lecture pouvait
- * commencer en plein milieu du morceau.
- *
- * Bénéfice secondaire : la barre de progression devient fiable, puisque le
- * serveur local gère les requêtes Range.
+ * Il n'est plus alimenté : une écoute passe maintenant par le relais local
+ * (`audioRelayUrl`), qui sert la piste par tranches au lieu de la rapatrier en
+ * entier avant le premier son. La constante reste car la section Stockage doit
+ * pouvoir montrer — et vider — ce que les versions précédentes y ont laissé.
  */
-export async function cacheRemoteAudio(url: string, cacheName: string): Promise<string> {
-  const filename = cacheName.replace(/[/\\]/g, "-");
-  const files = await listInstalled("audio", AUDIO_CACHE).catch(() => []);
-  const existing = files.find((f) => f.filename === filename);
-  const path = existing
-    ? existing.path
-    : await downloadFile({
-        url, kind: "audio", filename,
-        id: `cache:${filename}`, collection: AUDIO_CACHE,
-      });
-  const { cleanUrl } = await import("./media");
-  const local = cleanUrl(path);
-  if (!local) throw new Error("Chemin de cache illisible");
-  return local;
-}
+export const AUDIO_CACHE = "_cache";

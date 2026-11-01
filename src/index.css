@@ -56,23 +56,60 @@ embed, object, iframe {
 /* ---------------------------------------------------------------------------
    Transitions entre diapos — voir src/lib/transitions.ts
 
-   On n'anime que `opacity`, `transform` et `filter`. Le compositing de
-   WebKitGTK est désactivé (fenêtre noire sinon) : toute animation qui touche
-   à la géométrie relancerait un calcul de mise en page à chaque image, et la
-   projection saccaderait.
+   On n'anime que `opacity`, `transform` et `filter` : toute animation qui
+   touche à la géométrie relancerait un calcul de mise en page à chaque image,
+   et la projection saccaderait.
+
+   Les déplacements sont écrits en `translate3d` et chaque couche déclare
+   `will-change` : c'est ce qui permet au moteur de ne recomposer que la couche
+   animée au lieu de repeindre toute la diapo image par image. Depuis que le
+   chemin de rendu accéléré est le défaut (bibliothèque > Diagnostic > Rendu
+   des vidéos), c'est le GPU qui s'en charge.
+
+   ⚠ Le fondu N'EST PAS un fondu croisé.
+   Les deux couches étaient auparavant animées en miroir : au milieu de la
+   transition, les deux textes s'affichaient simultanément à 50 %. Sur un
+   cantique, où deux couplets se ressemblent et se superposent presque
+   lettre à lettre, l'assemblée voyait un texte dédoublé et illisible, et le
+   fond paraissait « clignoter » puisque les deux voiles translucides
+   s'additionnaient. Les phases sont donc décalées : la sortante s'efface
+   d'abord, l'entrante apparaît ensuite, avec un court recouvrement qui évite
+   le trou noir d'une coupe.
 
    La durée est injectée par le composant (`animation-duration` en style),
    d'où l'absence de durée ici.
 --------------------------------------------------------------------------- */
 .slide-layer {
-  animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
   animation-fill-mode: both;
+  will-change: opacity, transform;
+  /* Évite le liseré clair que WebKit laisse parfois sur le bord d'une couche
+     mise à l'échelle. */
+  backface-visibility: hidden;
 }
 
-@keyframes slide-fade-in { from { opacity: 0 } to { opacity: 1 } }
-@keyframes slide-fade-out { from { opacity: 1 } to { opacity: 0 } }
+/* Une diapo qui ARRIVE décélère ; une diapo qui PART accélère. L'ancienne
+   courbe unique donnait une sortie qui s'attardait, ce qui accentuait
+   justement le texte dédoublé.
+
+   ⚠ Les rôles sont portés par des classes explicites (`slide-enter` /
+   `slide-exit`) posées par le composant. Un sélecteur du genre
+   `[class*="-in"]` serait plus court mais faux : il attraperait aussi
+   `slide-anim-zoom-in-out`, qui est une SORTIE. */
+.slide-enter { animation-timing-function: cubic-bezier(0.16, 0.84, 0.3, 1) }
+.slide-exit { animation-timing-function: cubic-bezier(0.5, 0, 0.85, 0.3) }
+
+@keyframes slide-fade-in { 0%, 35% { opacity: 0 } 100% { opacity: 1 } }
+@keyframes slide-fade-out { 0% { opacity: 1 } 65%, 100% { opacity: 0 } }
 .slide-anim-fade-in { animation-name: slide-fade-in }
 .slide-anim-fade-out { animation-name: slide-fade-out }
+
+/* Le vrai fondu croisé, celui d'avant, gardé comme choix explicite : sur une
+   image ou une vidéo (où il n'y a pas de texte à dédoubler) il est plus doux
+   que le fondu décalé. */
+@keyframes slide-dissolve-in { from { opacity: 0 } to { opacity: 1 } }
+@keyframes slide-dissolve-out { from { opacity: 1 } to { opacity: 0 } }
+.slide-anim-dissolve-in { animation-name: slide-dissolve-in }
+.slide-anim-dissolve-out { animation-name: slide-dissolve-out }
 
 /* Fondu au noir : la diapo sortante s'efface sur la première moitié, l'entrante
    apparaît sur la seconde. Le voile noir est posé par le composant. */
@@ -81,45 +118,61 @@ embed, object, iframe {
 .slide-anim-fade-black-in { animation-name: slide-fade-black-in }
 .slide-anim-fade-black-out { animation-name: slide-fade-black-out }
 
-@keyframes slide-left-in { from { opacity: 0; transform: translateX(8%) } to { opacity: 1; transform: none } }
-@keyframes slide-left-out { from { opacity: 1; transform: none } to { opacity: 0; transform: translateX(-8%) } }
+/* Glissements : la sortante quitte l'écran plus loin qu'elle n'y entrait
+   (8 % contre 5 %), ce qui donne la sensation d'un vrai relais plutôt que
+   celle de deux textes qui se croisent. */
+@keyframes slide-left-in { from { opacity: 0; transform: translate3d(5%, 0, 0) } to { opacity: 1; transform: none } }
+@keyframes slide-left-out { 0% { opacity: 1; transform: none } 100% { opacity: 0; transform: translate3d(-8%, 0, 0) } }
 .slide-anim-slide-left-in { animation-name: slide-left-in }
 .slide-anim-slide-left-out { animation-name: slide-left-out }
 
-@keyframes slide-right-in { from { opacity: 0; transform: translateX(-8%) } to { opacity: 1; transform: none } }
-@keyframes slide-right-out { from { opacity: 1; transform: none } to { opacity: 0; transform: translateX(8%) } }
+@keyframes slide-right-in { from { opacity: 0; transform: translate3d(-5%, 0, 0) } to { opacity: 1; transform: none } }
+@keyframes slide-right-out { 0% { opacity: 1; transform: none } 100% { opacity: 0; transform: translate3d(8%, 0, 0) } }
 .slide-anim-slide-right-in { animation-name: slide-right-in }
 .slide-anim-slide-right-out { animation-name: slide-right-out }
 
-@keyframes slide-up-in { from { opacity: 0; transform: translateY(6%) } to { opacity: 1; transform: none } }
-@keyframes slide-up-out { from { opacity: 1; transform: none } to { opacity: 0; transform: translateY(-6%) } }
+@keyframes slide-up-in { from { opacity: 0; transform: translate3d(0, 4%, 0) } to { opacity: 1; transform: none } }
+@keyframes slide-up-out { 0% { opacity: 1; transform: none } 100% { opacity: 0; transform: translate3d(0, -6%, 0) } }
 .slide-anim-slide-up-in { animation-name: slide-up-in }
 .slide-anim-slide-up-out { animation-name: slide-up-out }
 
-@keyframes slide-down-in { from { opacity: 0; transform: translateY(-6%) } to { opacity: 1; transform: none } }
-@keyframes slide-down-out { from { opacity: 1; transform: none } to { opacity: 0; transform: translateY(6%) } }
+@keyframes slide-down-in { from { opacity: 0; transform: translate3d(0, -4%, 0) } to { opacity: 1; transform: none } }
+@keyframes slide-down-out { 0% { opacity: 1; transform: none } 100% { opacity: 0; transform: translate3d(0, 6%, 0) } }
 .slide-anim-slide-down-in { animation-name: slide-down-in }
 .slide-anim-slide-down-out { animation-name: slide-down-out }
 
-@keyframes slide-zoom-in-in { from { opacity: 0; transform: scale(0.94) } to { opacity: 1; transform: none } }
-@keyframes slide-zoom-in-out { from { opacity: 1; transform: none } to { opacity: 0; transform: scale(1.06) } }
+@keyframes slide-zoom-in-in { from { opacity: 0; transform: scale3d(0.96, 0.96, 1) } to { opacity: 1; transform: none } }
+@keyframes slide-zoom-in-out { 0% { opacity: 1; transform: none } 100% { opacity: 0; transform: scale3d(1.05, 1.05, 1) } }
 .slide-anim-zoom-in-in { animation-name: slide-zoom-in-in }
 .slide-anim-zoom-in-out { animation-name: slide-zoom-in-out }
 
-@keyframes slide-zoom-out-in { from { opacity: 0; transform: scale(1.06) } to { opacity: 1; transform: none } }
-@keyframes slide-zoom-out-out { from { opacity: 1; transform: none } to { opacity: 0; transform: scale(0.94) } }
+@keyframes slide-zoom-out-in { from { opacity: 0; transform: scale3d(1.05, 1.05, 1) } to { opacity: 1; transform: none } }
+@keyframes slide-zoom-out-out { 0% { opacity: 1; transform: none } 100% { opacity: 0; transform: scale3d(0.96, 0.96, 1) } }
 .slide-anim-zoom-out-in { animation-name: slide-zoom-out-in }
 .slide-anim-zoom-out-out { animation-name: slide-zoom-out-out }
 
-@keyframes slide-blur-in { from { opacity: 0; filter: blur(0.8vmin) } to { opacity: 1; filter: none } }
-@keyframes slide-blur-out { from { opacity: 1; filter: none } to { opacity: 0; filter: blur(0.8vmin) } }
-.slide-anim-blur-in { animation-name: slide-blur-in }
-.slide-anim-blur-out { animation-name: slide-blur-out }
+/* `blur` est la seule transition qui demande un vrai filtre par image : elle
+   reste proposée, mais son coût est signalé dans la liste des transitions. */
+@keyframes slide-blur-in { from { opacity: 0; filter: blur(0.6vmin) } to { opacity: 1; filter: blur(0) } }
+@keyframes slide-blur-out { 0% { opacity: 1; filter: blur(0) } 100% { opacity: 0; filter: blur(0.6vmin) } }
+.slide-anim-blur-in { animation-name: slide-blur-in; will-change: opacity, filter }
+.slide-anim-blur-out { animation-name: slide-blur-out; will-change: opacity, filter }
 
 /* Voile du « fondu au noir » : noir au milieu de la transition, transparent aux
    deux extrémités. */
 @keyframes slide-black-veil { 0% { opacity: 0 } 50% { opacity: 1 } 100% { opacity: 0 } }
 .slide-black-veil { animation-name: slide-black-veil }
+
+/* Accessibilité : certains opérateurs (et certains systèmes d'affichage)
+   demandent explicitement à ne pas animer. On respecte le réglage plutôt que
+   de lui imposer un mouvement. */
+@media (prefers-reduced-motion: reduce) {
+  .slide-layer {
+    animation-duration: 1ms !important;
+    animation-name: none !important;
+    will-change: auto;
+  }
+}
 
 /* ---------------------------------------------------------------------------
    Rendu Markdown (agenda de type « markdown »)
